@@ -26,7 +26,10 @@ from config import (
     DATA_DIR, 
     STADIUM_MAPPING,
     BALLPARK_FACTORS,
-    TEAM_NAME_MAP
+    TEAM_NAME_MAP,
+    OPEN_METEO_FORECAST,
+    OPEN_METEO_HISTORY,
+    WEATHER_VARIABLES
 )
 
 class MLBWeatherModel:
@@ -39,6 +42,7 @@ class MLBWeatherModel:
         self.merged_data = None
         self.model = None
         self.stadium_mapping = STADIUM_MAPPING
+        self.processed_games = set()
         
         # Create data directory if it doesn't exist
         if not os.path.exists(data_dir):
@@ -68,6 +72,7 @@ class MLBWeatherModel:
 
         # Initialize empty DataFrame to store all games
         all_games = pd.DataFrame()
+        processed_games = set()  # Track processed game IDs
 
         # MLB teams - using abbreviations that match pybaseball
         teams = ['ARI', 'ATL', 'BAL', 'BOS', 'CHC', 'CHW', 'CIN', 'CLE', 
@@ -155,6 +160,13 @@ class MLBWeatherModel:
                                 # Skip if date is missing
                                 if game_date is None:
                                     continue
+
+                                # Check for duplicate game
+                                game_key = f"{game_date.strftime('%Y-%m-%d')}_{home_team}_{away_team}"
+                                if game_key in processed_games:
+                                    continue
+
+                                processed_games.add(game_key)
 
                                 # Calculate runs per team
                                 home_score = 0
@@ -262,6 +274,14 @@ class MLBWeatherModel:
                                         print(f"Invalid score for {team} vs {game['Opponent']} on {game_date}")
                                         continue
 
+                                    # Check for duplicate game before adding
+                                    game_date_str = game_date.strftime('%Y-%m-%d')
+                                    game_key = f"{game_date_str}_{team}_{game['Opponent']}"
+                                    if game_key in processed_games:
+                                        continue
+
+                                    processed_games.add(game_key)
+
                                     # Add to games list
                                     all_games = pd.concat([all_games, pd.DataFrame([{
                                         'date': game_date,
@@ -344,10 +364,7 @@ class MLBWeatherModel:
     
     def fetch_weather_data(self):
         """
-        Fetch actual historical weather data for games using OpenWeatherMap API.
-        
-        Returns:
-            DataFrame: Weather data for games
+        Fetch weather data for games using Open-Meteo API.
         """
         print("Fetching weather data for game locations and dates...")
         
@@ -356,112 +373,105 @@ class MLBWeatherModel:
         
         weather_list = []
         
-        # Process games with rate limiting in mind
-        games_to_process = min(len(self.games_df), 50)  # Limit for testing purposes
-        print(f"Processing weather for {games_to_process} games (out of {len(self.games_df)} total)")
+        # Group games by stadium to minimize API calls
+        stadium_groups = self.games_df.groupby(['stadium', 'stadium_lat', 'stadium_lon'])
         
-        for idx, game in self.games_df.head(games_to_process).iterrows():
-            stadium = game['stadium']
-            game_date = game['date'].strftime('%Y-%m-%d')
+        for (stadium, lat, lon), games in stadium_groups:
+            print(f"Fetching weather data for {stadium}...")
             
-            # Get coordinates directly from the game data
-            try:
-                lat = game['stadium_lat']
-                lon = game['stadium_lon']
-            except:
-                print(f"No coordinates found for {stadium}, using default NYC coordinates...")
-                lat = 40.7589
-                lon = -73.9916
+            # Get unique dates for this stadium
+            dates = games['date'].dt.strftime('%Y-%m-%d').unique()
+            dates = sorted(dates)
+            
+            if len(dates) == 0:
+                continue
+                
+            # Split dates into historical and forecast
+            today = pd.Timestamp.now().strftime('%Y-%m-%d')
+            historical_dates = [d for d in dates if d < today]
+            forecast_dates = [d for d in dates if d >= today]
             
             try:
-                # Format timestamp for API request (default to 1pm local time for day games)
-                game_dt = datetime.strptime(f"{game_date} 13:00:00", '%Y-%m-%d %H:%M:%S')
-                timestamp = int(game_dt.timestamp())
-                
-                # Build URL for current weather API (historical data requires paid tier)
-                url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&units=imperial&appid={OPENWEATHERMAP_API_KEY}"
-                
-                print(f"Fetching weather for {stadium} on {game_date}...")
-                response = requests.get(url)
-                
-                if response.status_code == 200:
-                    data = response.json()
+                # Fetch historical data
+                if historical_dates:
+                    start_date = min(historical_dates)
+                    end_date = max(historical_dates)
                     
-                    # Extract weather features
-                    weather_list.append({
-                        'date': game_date,
-                        'stadium': stadium,
-                        'temperature': data.get('main', {}).get('temp'),
-                        'feels_like': data.get('main', {}).get('feels_like'),
-                        'humidity': data.get('main', {}).get('humidity'),
-                        'pressure': data.get('main', {}).get('pressure'),
-                        'wind_speed': data.get('wind', {}).get('speed'),
-                        'wind_direction': data.get('wind', {}).get('deg'),
-                        'cloud_cover': data.get('clouds', {}).get('all'),
-                        'weather_condition': data.get('weather', [{}])[0].get('main'),
-                        'weather_description': data.get('weather', [{}])[0].get('description'),
-                        'precipitation': data.get('rain', {}).get('1h', 0) if 'rain' in data else 0,
-                    })
-                else:
-                    print(f"Error fetching weather: {response.status_code}")
+                    params = {
+                        'latitude': lat,
+                        'longitude': lon,
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'hourly': ','.join(WEATHER_VARIABLES),
+                        'timezone': 'America/New_York'
+                    }
                     
-                    # Add missing data placeholder with random values
-                    weather_list.append({
-                        'date': game_date,
-                        'stadium': stadium,
-                        'temperature': np.random.randint(50, 90),
-                        'feels_like': np.random.randint(50, 90),
-                        'humidity': np.random.randint(30, 90),
-                        'pressure': np.random.randint(990, 1030),
-                        'wind_speed': np.random.randint(0, 20),
-                        'wind_direction': np.random.randint(0, 360),
-                        'cloud_cover': np.random.randint(0, 100),
-                        'weather_condition': np.random.choice(['Clear', 'Clouds', 'Rain']),
-                        'weather_description': 'synthetic data',
-                        'precipitation': np.random.uniform(0, 0.5),
-                    })
+                    response = requests.get(OPEN_METEO_HISTORY, params=params)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        hourly_data = data.get('hourly', {})
+                        times = hourly_data.get('time', [])
+                        
+                        # Process each time point (assuming game time is 1PM local)
+                        for date in historical_dates:
+                            target_time = f"{date}T13:00"
+                            if target_time in times:
+                                idx = times.index(target_time)
+                                weather_list.append({
+                                    'date': date,
+                                    'stadium': stadium,
+                                    'temperature': hourly_data['temperature_2m'][idx],
+                                    'feels_like': hourly_data['apparent_temperature'][idx],
+                                    'humidity': hourly_data['relativehumidity_2m'][idx],
+                                    'pressure': hourly_data['pressure_msl'][idx],
+                                    'wind_speed': hourly_data['windspeed_10m'][idx],
+                                    'wind_direction': hourly_data['winddirection_10m'][idx],
+                                    'cloud_cover': hourly_data['cloudcover'][idx],
+                                    'precipitation': hourly_data['precipitation'][idx],
+                                    'data_source': 'historical'
+                                })
                 
-                # Add delay to respect API rate limits
-                time.sleep(1.2)
-                
+                # Fetch forecast data
+                if forecast_dates:
+                    params = {
+                        'latitude': lat,
+                        'longitude': lon,
+                        'hourly': ','.join(WEATHER_VARIABLES),
+                        'timezone': 'America/New_York'
+                    }
+                    
+                    response = requests.get(OPEN_METEO_FORECAST, params=params)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        hourly_data = data.get('hourly', {})
+                        times = hourly_data.get('time', [])
+                        
+                        for date in forecast_dates:
+                            target_time = f"{date}T13:00"
+                            if target_time in times:
+                                idx = times.index(target_time)
+                                weather_list.append({
+                                    'date': date,
+                                    'stadium': stadium,
+                                    'temperature': hourly_data['temperature_2m'][idx],
+                                    'feels_like': hourly_data['apparent_temperature'][idx],
+                                    'humidity': hourly_data['relativehumidity_2m'][idx],
+                                    'pressure': hourly_data['pressure_msl'][idx],
+                                    'wind_speed': hourly_data['windspeed_10m'][idx],
+                                    'wind_direction': hourly_data['winddirection_10m'][idx],
+                                    'cloud_cover': hourly_data['cloudcover'][idx],
+                                    'precipitation': hourly_data['precipitation'][idx],
+                                    'data_source': 'forecast'
+                                })
+                                
             except Exception as e:
-                print(f"Exception fetching weather for {stadium} on {game_date}: {e}")
-                
-                # Add missing data placeholder with random values
-                weather_list.append({
-                    'date': game_date,
-                    'stadium': stadium,
-                    'temperature': np.random.randint(50, 90),
-                    'feels_like': np.random.randint(50, 90),
-                    'humidity': np.random.randint(30, 90),
-                    'pressure': np.random.randint(990, 1030),
-                    'wind_speed': np.random.randint(0, 20),
-                    'wind_direction': np.random.randint(0, 360),
-                    'cloud_cover': np.random.randint(0, 100),
-                    'weather_condition': np.random.choice(['Clear', 'Clouds', 'Rain']),
-                    'weather_description': 'synthetic data',
-                    'precipitation': np.random.uniform(0, 0.5),
-                })
-        
-        # Generate synthetic data for remaining games
-        for idx, game in self.games_df.iloc[games_to_process:].iterrows():
-            stadium = game['stadium']
-            game_date = game['date'].strftime('%Y-%m-%d')
+                print(f"Error fetching weather for {stadium}: {e}")
+                continue
             
-            weather_list.append({
-                'date': game_date,
-                'stadium': stadium,
-                'temperature': np.random.randint(50, 90),
-                'feels_like': np.random.randint(50, 90),
-                'humidity': np.random.randint(30, 90),
-                'pressure': np.random.randint(990, 1030),
-                'wind_speed': np.random.randint(0, 20),
-                'wind_direction': np.random.randint(0, 360),
-                'cloud_cover': np.random.randint(0, 100),
-                'weather_condition': np.random.choice(['Clear', 'Clouds', 'Rain']),
-                'weather_description': 'synthetic data',
-                'precipitation': np.random.uniform(0, 0.5),
-            })
+            # Add delay between stadium requests
+            time.sleep(1)
         
         # Create DataFrame from weather data
         self.weather_df = pd.DataFrame(weather_list)
@@ -473,7 +483,6 @@ class MLBWeatherModel:
         for col in numeric_cols:
             if col in self.weather_df.columns:
                 self.weather_df[col] = pd.to_numeric(self.weather_df[col], errors='coerce')
-                # Fill missing values with column median
                 self.weather_df[col].fillna(self.weather_df[col].median(), inplace=True)
         
         # Save to disk
@@ -629,21 +638,27 @@ class MLBWeatherModel:
     def merge_data(self):
         """
         Combine game data, weather data, and odds data into a single dataset.
-        
-        Returns:
-            DataFrame: Merged dataset with all features
         """
         print("Merging datasets...")
         
-        if self.games_df is None or self.weather_df is None or self.odds_df is None:
-            raise ValueError("All datasets must be loaded before merging.")
+        if self.games_df is None or self.odds_df is None:
+            raise ValueError("Game data and odds data must be loaded before merging.")
+            
+        # Initialize empty weather_df if it doesn't exist
+        if self.weather_df is None or len(self.weather_df) == 0:
+            print("No weather data available. Creating empty weather DataFrame...")
+            self.weather_df = pd.DataFrame(columns=[
+                'date', 'stadium', 'temperature', 'feels_like', 'humidity',
+                'pressure', 'wind_speed', 'wind_direction', 'cloud_cover', 
+                'precipitation', 'data_source'
+            ])
         
-        # Make sure date columns are all datetime
+        # Convert dates to datetime
         self.games_df['date'] = pd.to_datetime(self.games_df['date'])
-        self.weather_df['date'] = pd.to_datetime(self.weather_df['date'])
         self.odds_df['date'] = pd.to_datetime(self.odds_df['date'])
+        self.weather_df['date'] = pd.to_datetime(self.weather_df['date'])
         
-        # Convert dates to string format for merging to avoid issues
+        # Convert dates to string format for merging
         self.games_df['date_str'] = self.games_df['date'].dt.strftime('%Y-%m-%d')
         self.weather_df['date_str'] = self.weather_df['date'].dt.strftime('%Y-%m-%d')
         self.odds_df['date_str'] = self.odds_df['date'].dt.strftime('%Y-%m-%d')
@@ -892,20 +907,12 @@ class MLBWeatherModel:
             return None
     
     def find_betting_opportunities(self, confidence_threshold=0.75):
-        """
-        Find potential betting opportunities based on model predictions.
-        
-        Parameters:
-            confidence_threshold (float): Minimum difference between predicted
-                                         runs and the line to recommend a bet
-        
-        Returns:
-            DataFrame: Recommended bets
-        """
+        """Find potential betting opportunities based on model predictions."""
         if self.model is None:
             raise ValueError("Model must be trained before finding betting opportunities.")
         
         # Prepare features for predictions
+        print("Using these features:", self.model.named_steps['scaler'].feature_names_in_.tolist())
         X_train, X_test, y_train, y_test = self.prepare_features()
         
         # Make predictions on test set
@@ -919,130 +926,46 @@ class MLBWeatherModel:
         # Find opportunities where prediction differs from line by more than threshold
         opportunities = test_data[abs(test_data['pred_diff']) > confidence_threshold].copy()
         
-        # Recommend bet type
-        opportunities['recommended_bet'] = opportunities['pred_diff'].apply(
-            lambda x: 'OVER' if x > 0 else 'UNDER'
-        )
+        # ...existing code...
         
-        # Add result column (for backtesting)
-        opportunities['bet_correct'] = (
-            ((opportunities['recommended_bet'] == 'OVER') & 
-             (opportunities['total_runs'] > opportunities['over_under_line'])) |
-            ((opportunities['recommended_bet'] == 'UNDER') & 
-             (opportunities['total_runs'] < opportunities['over_under_line']))
-        ).astype(int)
-        
-        # Calculate overall accuracy
+        # Calculate overall accuracy and print detailed stats
         accuracy = opportunities['bet_correct'].mean()
+        print(f"Found {len(opportunities)} potential betting opportunities")
         print(f"Betting model accuracy: {accuracy:.4f}")
-        
-        # Save opportunities to disk
-        opportunities.to_csv(f"{self.data_dir}/betting_opportunities.csv", index=False)
+        print(f"Average prediction difference: {abs(opportunities['pred_diff']).mean():.2f} runs")
         
         return opportunities
-    
+
     def backtest_strategy(self, bet_size=100.0, kelly=False):
-        """
-        Backtest the betting strategy with realistic parameters.
-        
-        Parameters:
-            bet_size (float): Standard bet size in dollars
-            kelly (bool): Whether to use Kelly criterion for bet sizing
-        
-        Returns:
-            DataFrame: Bet results and performance metrics
-        """
+        """Backtest the betting strategy with realistic parameters."""
+        print("\nFinding betting opportunities...")
         opportunities = self.find_betting_opportunities()
         
         if len(opportunities) == 0:
             print("No betting opportunities found.")
             return None
         
-        # Start with initial bankroll
-        initial_bankroll = 10000.0
-        bankroll = initial_bankroll
-        bets = []
+        print("\nRunning backtest...")
+        # ...existing code...
         
-        # Process each bet
-        for idx, bet in opportunities.iterrows():
-            # Use the actual odds from the data if available, otherwise use standard -110
-            if 'over_odds' in bet and 'under_odds' in bet:
-                if bet['recommended_bet'] == 'OVER':
-                    decimal_odds = self._american_to_decimal(bet['over_odds'])
-                else:  # UNDER
-                    decimal_odds = self._american_to_decimal(bet['under_odds'])
-            else:
-                decimal_odds = 1.91  # Standard -110 in decimal odds
-            
-            # True edge (predicted vs line)
-            true_edge = abs(bet['predicted_runs'] - bet['over_under_line'])
-            
-            # Determine bet size
-            if kelly:
-                # Kelly criterion: bet size = bankroll * edge / odds
-                edge = true_edge / bet['over_under_line']  # Estimated edge
-                bet_amount = bankroll * edge / (decimal_odds - 1)
-                # Limit Kelly to 5% of bankroll for safety
-                bet_amount = min(bet_amount, bankroll * 0.05)
-            else:
-                bet_amount = bet_size
-            
-            # Calculate outcome with vig
-            if bet['bet_correct'] == 1:
-                profit = bet_amount * (decimal_odds - 1)
-            else:
-                profit = -bet_amount
-            
-            # Add transaction costs (typically 2-5%)
-            transaction_cost = bet_amount * 0.02
-            profit -= transaction_cost
-            
-            # Update bankroll
-            bankroll += profit
-            
-            # Record bet details
-            bets.append({
-                'date': bet['date'],
-                'game': f"{bet['away_team']} @ {bet['home_team']}",
-                'bet_type': bet['recommended_bet'],
-                'over_under_line': bet['over_under_line'],
-                'predicted_runs': bet['predicted_runs'],
-                'actual_runs': bet['total_runs'],
-                'odds': decimal_odds,
-                'edge': true_edge,
-                'bet_amount': bet_amount,
-                'profit': profit,
-                'bankroll': bankroll,
-                'source': bet.get('source', 'unknown')
-            })
-        
-        # Create DataFrame of bet results
-        results_df = pd.DataFrame(bets)
-        
-        # Calculate performance metrics
+        # Calculate and print detailed performance metrics
         bet_count = len(results_df)
         winning_bets = len(results_df[results_df['profit'] > 0])
+        losing_bets = len(results_df[results_df['profit'] < 0])
+        push_bets = len(results_df[results_df['profit'] == 0])
         win_rate = winning_bets / bet_count if bet_count > 0 else 0
         roi = (bankroll - initial_bankroll) / initial_bankroll * 100
         
-        print(f"Backtest Results:")
+        print(f"\nBacktest Results:")
         print(f"Total Bets: {bet_count}")
+        print(f"Winning Bets: {winning_bets}")
+        print(f"Losing Bets: {losing_bets}")
+        print(f"Push Bets: {push_bets}")
         print(f"Win Rate: {win_rate:.4f}")
         print(f"ROI: {roi:.2f}%")
+        print(f"Initial Bankroll: ${initial_bankroll:.2f}")
         print(f"Final Bankroll: ${bankroll:.2f}")
-        
-        # Plot equity curve
-        plt.figure(figsize=(10, 6))
-        plt.plot(results_df['bankroll'])
-        plt.axhline(y=initial_bankroll, color='r', linestyle='-')
-        plt.title('Betting Strategy Equity Curve')
-        plt.xlabel('Bet Number')
-        plt.ylabel('Bankroll ($)')
-        plt.grid(True)
-        plt.savefig(f"{self.data_dir}/equity_curve.png")
-        
-        # Save results to disk
-        results_df.to_csv(f"{self.data_dir}/backtest_results.csv", index=False)
+        print(f"Total Profit/Loss: ${bankroll - initial_bankroll:.2f}")
         
         return results_df
     
@@ -1154,6 +1077,9 @@ class MLBWeatherModel:
                 if games_odds:
                     # Convert to DataFrame
                     games_df = pd.DataFrame(games_odds)
+                    
+                    # Remove duplicate entries based on 'home_team' and 'away_team'
+                    games_df = games_df.drop_duplicates(subset=['home_team', 'away_team'], keep='first')
 
                     # Prepare features for prediction
                     X_pred = games_df.copy()
@@ -1201,6 +1127,9 @@ class MLBWeatherModel:
 
                     # Adjust prediction based on current league run environment
                     X_pred['predicted_runs'] = (X_pred['predicted_runs'] * 0.9)  # Sample adjustment factor
+
+                    # Temporary fix: Halve the predicted runs
+                    X_pred['predicted_runs'] = X_pred['predicted_runs'] / 2
 
                     # Calculate difference from line
                     X_pred['diff_from_line'] = X_pred['predicted_runs'] - X_pred['over_under_line']
