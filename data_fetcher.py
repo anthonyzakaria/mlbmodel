@@ -81,12 +81,40 @@ def fetch_historical_games(start_year=2022, end_year=2024):
             try:
                 print(f"Fetching schedule for {team} {year}...")
                 
-                # Get team's schedule (no parse_dates param)
+                # Get team's schedule (removed parse_dates parameter)
                 try:
                     team_schedule = pybaseball.schedule_and_record(year, team)
                 except Exception as e:
                     print(f"Error fetching schedule: {e}")
                     continue
+                
+                # Manually parse dates after retrieving the data
+                if 'Date' in team_schedule.columns:
+                    date_series = []
+                    for date_str in team_schedule['Date']:
+                        try:
+                            # Standard format
+                            date = pd.to_datetime(date_str)
+                        except:
+                            try:
+                                # Try manual parsing
+                                match = re.search(r'(\w+), (\w+) (\d+)', date_str)
+                                if match:
+                                    month_str, day_str = match.group(2), match.group(3)
+                                    month_map = {
+                                        'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4,
+                                        'May': 5, 'Jun': 6, 'Jul': 7, 'Aug': 8,
+                                        'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+                                    }
+                                    month_num = month_map.get(month_str, 1)
+                                    date = pd.Timestamp(year=year, month=month_num, day=int(day_str))
+                                else:
+                                    date = pd.NaT
+                            except:
+                                date = pd.NaT
+                        date_series.append(date)
+                    
+                    team_schedule['parsed_date'] = date_series
                 
                 # Filter for completed regular season games
                 completed_games = team_schedule[team_schedule['R'].notna() & team_schedule['RA'].notna()]
@@ -96,12 +124,18 @@ def fetch_historical_games(start_year=2022, end_year=2024):
                     try:
                         # Only process home games to avoid duplicates
                         if game['Home_Away'] == 'Home':
-                            # Parse date with robust error handling
-                            game_date = parse_game_date(game['Date'], year)
+                            # Get game date
+                            if 'parsed_date' in team_schedule.columns:
+                                game_date = game['parsed_date']
+                            else:
+                                try:
+                                    game_date = pd.to_datetime(game['Date'])
+                                except:
+                                    print(f"Skipping game with unparseable date: {game['Date']}")
+                                    continue
                             
-                            # Skip if date couldn't be parsed
-                            if game_date is None:
-                                print(f"Skipping game with unparseable date: {game['Date']}")
+                            # Skip if date is invalid
+                            if pd.isna(game_date):
                                 continue
                             
                             # Get stadium info

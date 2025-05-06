@@ -9,8 +9,52 @@ import numpy as np
 from datetime import datetime
 import matplotlib.gridspec as gridspec
 from matplotlib.ticker import MaxNLocator
+import matplotlib.patches as mpatches
+import os
 
-from config import DATA_DIR, STADIUM_MAPPING
+# Try to import config with fallbacks
+try:
+    from config import DATA_DIR, STADIUM_MAPPING
+except ImportError:
+    print("Config import failed. Using fallback values.")
+    # Fallback for DATA_DIR
+    DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+    
+    # Fallback for STADIUM_MAPPING
+    STADIUM_MAPPING = {
+        'ARI': {'name': 'Chase Field', 'lat': 33.445, 'lon': -112.067, 'dome': False, 'retractable_roof': True, 'altitude': 1059},
+        'ATL': {'name': 'Truist Park', 'lat': 33.891, 'lon': -84.468, 'dome': False, 'retractable_roof': False, 'altitude': 1000},
+        'BAL': {'name': 'Oriole Park at Camden Yards', 'lat': 39.284, 'lon': -76.622, 'dome': False, 'retractable_roof': False, 'altitude': 36},
+        'BOS': {'name': 'Fenway Park', 'lat': 42.346, 'lon': -71.097, 'dome': False, 'retractable_roof': False, 'altitude': 20},
+        'CHC': {'name': 'Wrigley Field', 'lat': 41.948, 'lon': -87.656, 'dome': False, 'retractable_roof': False, 'altitude': 594},
+        'CHW': {'name': 'Guaranteed Rate Field', 'lat': 41.83, 'lon': -87.634, 'dome': False, 'retractable_roof': False, 'altitude': 594},
+        'CIN': {'name': 'Great American Ball Park', 'lat': 39.097, 'lon': -84.506, 'dome': False, 'retractable_roof': False, 'altitude': 490},
+        'CLE': {'name': 'Progressive Field', 'lat': 41.496, 'lon': -81.685, 'dome': False, 'retractable_roof': False, 'altitude': 653},
+        'COL': {'name': 'Coors Field', 'lat': 39.756, 'lon': -104.994, 'dome': False, 'retractable_roof': False, 'altitude': 5280},
+        'DET': {'name': 'Comerica Park', 'lat': 42.339, 'lon': -83.049, 'dome': False, 'retractable_roof': False, 'altitude': 600},
+        'HOU': {'name': 'Minute Maid Park', 'lat': 29.757, 'lon': -95.355, 'dome': False, 'retractable_roof': True, 'altitude': 43},
+        'KCR': {'name': 'Kauffman Stadium', 'lat': 39.051, 'lon': -94.48, 'dome': False, 'retractable_roof': False, 'altitude': 750},
+        'LAA': {'name': 'Angel Stadium', 'lat': 33.8, 'lon': -117.883, 'dome': False, 'retractable_roof': False, 'altitude': 157},
+        'LAD': {'name': 'Dodger Stadium', 'lat': 34.074, 'lon': -118.24, 'dome': False, 'retractable_roof': False, 'altitude': 500},
+        'MIA': {'name': 'LoanDepot Park', 'lat': 25.778, 'lon': -80.22, 'dome': False, 'retractable_roof': True, 'altitude': 10},
+        'MIL': {'name': 'American Family Field', 'lat': 43.028, 'lon': -87.971, 'dome': False, 'retractable_roof': True, 'altitude': 602},
+        'MIN': {'name': 'Target Field', 'lat': 44.982, 'lon': -93.278, 'dome': False, 'retractable_roof': False, 'altitude': 840},
+        'NYM': {'name': 'Citi Field', 'lat': 40.757, 'lon': -73.846, 'dome': False, 'retractable_roof': False, 'altitude': 10},
+        'NYY': {'name': 'Yankee Stadium', 'lat': 40.829, 'lon': -73.926, 'dome': False, 'retractable_roof': False, 'altitude': 12},
+        'OAK': {'name': 'Oakland Coliseum', 'lat': 37.752, 'lon': -122.197, 'dome': False, 'retractable_roof': False, 'altitude': 42},
+        'PHI': {'name': 'Citizens Bank Park', 'lat': 39.906, 'lon': -75.166, 'dome': False, 'retractable_roof': False, 'altitude': 39},
+        'PIT': {'name': 'PNC Park', 'lat': 40.447, 'lon': -80.006, 'dome': False, 'retractable_roof': False, 'altitude': 726},
+        'SDP': {'name': 'Petco Park', 'lat': 32.707, 'lon': -117.157, 'dome': False, 'retractable_roof': False, 'altitude': 20},
+        'SEA': {'name': 'T-Mobile Park', 'lat': 47.591, 'lon': -122.332, 'dome': False, 'retractable_roof': True, 'altitude': 16},
+        'SFG': {'name': 'Oracle Park', 'lat': 37.778, 'lon': -122.389, 'dome': False, 'retractable_roof': False, 'altitude': 15},
+        'STL': {'name': 'Busch Stadium', 'lat': 38.623, 'lon': -90.193, 'dome': False, 'retractable_roof': False, 'altitude': 446},
+        'TBR': {'name': 'Tropicana Field', 'lat': 27.768, 'lon': -82.653, 'dome': True, 'retractable_roof': False, 'altitude': 43},
+        'TEX': {'name': 'Globe Life Field', 'lat': 32.747, 'lon': -97.082, 'dome': False, 'retractable_roof': True, 'altitude': 545},
+        'TOR': {'name': 'Rogers Centre', 'lat': 43.641, 'lon': -79.389, 'dome': False, 'retractable_roof': True, 'altitude': 266},
+        'WSN': {'name': 'Nationals Park', 'lat': 38.873, 'lon': -77.008, 'dome': False, 'retractable_roof': False, 'altitude': 25}
+    }
 
 # Set default style
 sns.set_style("whitegrid")
@@ -57,8 +101,22 @@ def visualize_betting_opportunities(betting_df, results=None, title=None, save=F
     # Create matchup labels
     betting_df['matchup'] = betting_df['away_team'] + ' @ ' + betting_df['home_team']
     
+    # Determine which column to use for bet type (recommended_bet or bet_type)
+    bet_column = None
+    if 'recommended_bet' in betting_df.columns:
+        bet_column = 'recommended_bet'
+    elif 'bet_type' in betting_df.columns:
+        bet_column = 'bet_type'
+    else:
+        # If neither exists, create a default column
+        betting_df['bet_type'] = 'OVER'  # Default to over
+        bet_column = 'bet_type'
+    
+    # Normalize bet type to uppercase for consistency
+    betting_df[bet_column] = betting_df[bet_column].str.upper()
+    
     # Set colors based on recommendation
-    colors = [COLORS['over'] if bet == 'OVER' else COLORS['under'] for bet in betting_df['recommended_bet']]
+    colors = [COLORS['over'] if bet == 'OVER' else COLORS['under'] for bet in betting_df[bet_column]]
     
     # 1. Bar chart of predicted runs vs. Vegas line
     ax1 = plt.subplot(gs[0, :])
@@ -185,17 +243,21 @@ def visualize_betting_opportunities(betting_df, results=None, title=None, save=F
         print(f"{best_bet['away_team']} @ {best_bet['home_team']}")
         print(f"Line: {best_bet['over_under_line']}")
         print(f"Model Prediction: {best_bet['predicted_runs']:.2f} runs")
-        print(f"Recommendation: {best_bet['recommended_bet']}")
+        print(f"Recommendation: {best_bet[bet_column]}")
         print(f"Confidence: {best_bet['confidence']:.2f} runs difference")
     
     # Create a simple table of all bets
     display_df = betting_df[['matchup', 'over_under_line', 'predicted_runs', 
-                           'recommended_bet', 'confidence']].copy()
+                           bet_column, 'confidence']].copy()
     
     # Calculate the difference column
     display_df['difference'] = display_df['predicted_runs'] - display_df['over_under_line']
     display_df['difference'] = display_df['difference'].round(2)
     display_df['predicted_runs'] = display_df['predicted_runs'].round(2)
+    
+    # Rename the bet column to a consistent name for display
+    if bet_column != 'recommended_bet':
+        display_df = display_df.rename(columns={bet_column: 'recommended_bet'})
     
     # Display the table
     print("\nAll MLB Betting Recommendations:")
@@ -224,6 +286,20 @@ def visualize_weather_impact(opportunities, results=None, save=False):
         print("No opportunities data available to visualize.")
         return
     
+    # Determine which column to use for bet type (recommended_bet or bet_type)
+    bet_column = None
+    if 'recommended_bet' in opportunities.columns:
+        bet_column = 'recommended_bet'
+    elif 'bet_type' in opportunities.columns:
+        bet_column = 'bet_type'
+    else:
+        # If neither exists, create a default column
+        opportunities['bet_type'] = 'OVER'  # Default to over
+        bet_column = 'bet_type'
+    
+    # Normalize bet type to uppercase for consistency
+    opportunities[bet_column] = opportunities[bet_column].str.upper()
+    
     # Check if we have the necessary columns to show results
     has_results = 'total_runs' in opportunities.columns and 'over_under_line' in opportunities.columns
     
@@ -234,13 +310,13 @@ def visualize_weather_impact(opportunities, results=None, save=False):
         opportunities['push_result'] = (opportunities['total_runs'] == opportunities['over_under_line']).astype(int)
         
         opportunities['bet_correct'] = (
-            ((opportunities['recommended_bet'] == 'OVER') & (opportunities['over_result'] == 1)) |
-            ((opportunities['recommended_bet'] == 'UNDER') & (opportunities['under_result'] == 1))
+            ((opportunities[bet_column] == 'OVER') & (opportunities['over_result'] == 1)) |
+            ((opportunities[bet_column] == 'UNDER') & (opportunities['under_result'] == 1))
         ).astype(int)
         
         opportunities['bet_incorrect'] = (
-            ((opportunities['recommended_bet'] == 'OVER') & (opportunities['under_result'] == 1)) |
-            ((opportunities['recommended_bet'] == 'UNDER') & (opportunities['over_result'] == 1))
+            ((opportunities[bet_column] == 'OVER') & (opportunities['under_result'] == 1)) |
+            ((opportunities[bet_column] == 'UNDER') & (opportunities['over_result'] == 1))
         ).astype(int)
     
     # Create figure with subplots
@@ -478,76 +554,82 @@ def visualize_weather_impact(opportunities, results=None, save=False):
     # 6. Stadium Altitude vs. Run Scoring
     ax6 = plt.subplot(gs[1, 2])
     
-    # Create a mapping of stadium altitudes
-    stadium_altitudes = {stadium_info['name']: stadium_info.get('altitude', 0) 
-                         for team, stadium_info in STADIUM_MAPPING.items()}
-    
-    if 'stadium' in opportunities.columns and 'total_runs' in opportunities.columns:
-        # Add altitude to opportunities
-        opportunities['altitude'] = opportunities['stadium'].map(stadium_altitudes)
+    # Try to get stadium altitudes with fallback
+    try:
+        # Create a mapping of stadium altitudes
+        stadium_altitudes = {stadium_info['name']: stadium_info.get('altitude', 0) 
+                            for team, stadium_info in STADIUM_MAPPING.items()}
         
-        # Get stadiums with at least 5 games
-        stadium_counts = opportunities['stadium'].value_counts()
-        valid_stadiums = stadium_counts[stadium_counts >= 5].index.tolist()
-        
-        # Calculate average runs by stadium
-        stadium_runs = opportunities[opportunities['stadium'].isin(valid_stadiums)]
-        stadium_avg_runs = stadium_runs.groupby('stadium').agg({
-            'total_runs': ['mean', 'count'],
-            'altitude': 'first'
-        }).reset_index()
-        
-        stadium_avg_runs.columns = ['stadium', 'avg_runs', 'count', 'altitude']
-        
-        # Sort by altitude
-        stadium_avg_runs = stadium_avg_runs.sort_values('altitude')
-        
-        # Scatter plot
-        scatter = ax6.scatter(
-            stadium_avg_runs['altitude'],
-            stadium_avg_runs['avg_runs'],
-            s=stadium_avg_runs['count'] * 3,  # Size by game count
-            alpha=0.7,
-            c=stadium_avg_runs['avg_runs'],
-            cmap='viridis',
-            edgecolor='k'
-        )
-        
-        # Add stadium labels to notable points
-        for i, row in stadium_avg_runs.iterrows():
-            if row['avg_runs'] > stadium_avg_runs['avg_runs'].mean() + 0.5 or \
-               row['altitude'] > 1000 or row['count'] > 20:
-                ax6.annotate(
-                    row['stadium'],
-                    xy=(row['altitude'], row['avg_runs']),
-                    xytext=(5, 0),
-                    textcoords='offset points',
-                    fontsize=8,
-                    alpha=0.8
-                )
-        
-        # Add trend line
-        z = np.polyfit(stadium_avg_runs['altitude'], stadium_avg_runs['avg_runs'], 1)
-        p = np.poly1d(z)
-        x_trend = np.linspace(stadium_avg_runs['altitude'].min(), stadium_avg_runs['altitude'].max(), 100)
-        ax6.plot(x_trend, p(x_trend), 'k--', alpha=0.6)
-        
-        # Show correlation
-        corr = stadium_avg_runs['altitude'].corr(stadium_avg_runs['avg_runs'])
-        ax6.text(0.05, 0.95, f"Correlation: {corr:.2f}", transform=ax6.transAxes,
-               fontsize=10, va='top', ha='left', bbox=dict(boxstyle='round', alpha=0.1))
-        
-        ax6.set_title('Stadium Altitude vs. Average Runs', fontsize=14)
-        ax6.set_xlabel('Altitude (feet)', fontsize=12)
-        ax6.set_ylabel('Average Runs', fontsize=12)
-        ax6.grid(True, alpha=0.3)
-        
-        # Add colorbar
-        cbar = plt.colorbar(scatter, ax=ax6)
-        cbar.set_label('Average Runs', fontsize=10)
-    else:
-        ax6.text(0.5, 0.5, "Stadium or run data not available", 
-               ha='center', va='center', transform=ax6.transAxes, fontsize=12)
+        if 'stadium' in opportunities.columns and 'total_runs' in opportunities.columns:
+            # Add altitude to opportunities
+            opportunities['altitude'] = opportunities['stadium'].map(stadium_altitudes)
+            
+            # Get stadiums with at least 5 games
+            stadium_counts = opportunities['stadium'].value_counts()
+            valid_stadiums = stadium_counts[stadium_counts >= 5].index.tolist()
+            
+            # Calculate average runs by stadium
+            stadium_runs = opportunities[opportunities['stadium'].isin(valid_stadiums)]
+            stadium_avg_runs = stadium_runs.groupby('stadium').agg({
+                'total_runs': ['mean', 'count'],
+                'altitude': 'first'
+            }).reset_index()
+            
+            stadium_avg_runs.columns = ['stadium', 'avg_runs', 'count', 'altitude']
+            
+            # Sort by altitude
+            stadium_avg_runs = stadium_avg_runs.sort_values('altitude')
+            
+            # Scatter plot
+            scatter = ax6.scatter(
+                stadium_avg_runs['altitude'],
+                stadium_avg_runs['avg_runs'],
+                s=stadium_avg_runs['count'] * 3,  # Size by game count
+                alpha=0.7,
+                c=stadium_avg_runs['avg_runs'],
+                cmap='viridis',
+                edgecolor='k'
+            )
+            
+            # Add stadium labels to notable points
+            for i, row in stadium_avg_runs.iterrows():
+                if row['avg_runs'] > stadium_avg_runs['avg_runs'].mean() + 0.5 or \
+                row['altitude'] > 1000 or row['count'] > 20:
+                    ax6.annotate(
+                        row['stadium'],
+                        xy=(row['altitude'], row['avg_runs']),
+                        xytext=(5, 0),
+                        textcoords='offset points',
+                        fontsize=8,
+                        alpha=0.8
+                    )
+            
+            # Add trend line
+            z = np.polyfit(stadium_avg_runs['altitude'], stadium_avg_runs['avg_runs'], 1)
+            p = np.poly1d(z)
+            x_trend = np.linspace(stadium_avg_runs['altitude'].min(), stadium_avg_runs['altitude'].max(), 100)
+            ax6.plot(x_trend, p(x_trend), 'k--', alpha=0.6)
+            
+            # Show correlation
+            corr = stadium_avg_runs['altitude'].corr(stadium_avg_runs['avg_runs'])
+            ax6.text(0.05, 0.95, f"Correlation: {corr:.2f}", transform=ax6.transAxes,
+                fontsize=10, va='top', ha='left', bbox=dict(boxstyle='round', alpha=0.1))
+            
+            ax6.set_title('Stadium Altitude vs. Average Runs', fontsize=14)
+            ax6.set_xlabel('Altitude (feet)', fontsize=12)
+            ax6.set_ylabel('Average Runs', fontsize=12)
+            ax6.grid(True, alpha=0.3)
+            
+            # Add colorbar
+            cbar = plt.colorbar(scatter, ax=ax6)
+            cbar.set_label('Average Runs', fontsize=10)
+        else:
+            ax6.text(0.5, 0.5, "Stadium or run data not available", 
+                ha='center', va='center', transform=ax6.transAxes, fontsize=12)
+    except Exception as e:
+        print(f"Error processing stadium altitude data: {e}")
+        ax6.text(0.5, 0.5, "Stadium altitude data processing error", 
+            ha='center', va='center', transform=ax6.transAxes, fontsize=12)
     
     # Set overall title
     plt.suptitle('Weather Impact on MLB Run Scoring and Betting Success', fontsize=16, fontweight='bold')

@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import time
 import re
+import sys
 
 # Import configuration
 from config import DATA_DIR, STADIUM_MAPPING, BALLPARK_FACTORS
@@ -24,8 +25,27 @@ except ImportError:
     print("Enhanced model not available. Falling back to basic model.")
     from mlb_weather_model import MLBWeatherModel as MLBModel
 
-# Import visualization module
-from visualization import visualize_mlb_bets, visualize_weather_impact
+# Import visualization modules with proper error handling
+try:
+    from enhanced_visualization import visualize_betting_opportunities as visualize_mlb_bets, visualize_weather_impact
+    print("Using enhanced visualization module")
+except ImportError:
+    try:
+        from visualization import visualize_mlb_bets, visualize_weather_impact
+        print("Using standard visualization module")
+    except ImportError:
+        print("Warning: Visualization modules not available. Visualizations will be disabled.")
+        
+        # Create dummy visualization functions
+        def visualize_mlb_bets(bets_df):
+            print("Visualization module not available. Showing text summary instead:")
+            print(f"Found {len(bets_df)} betting opportunities.")
+            if len(bets_df) > 0:
+                for _, bet in bets_df.iterrows():
+                    print(f"* {bet['date'].strftime('%Y-%m-%d')}: {bet['away_team']} @ {bet['home_team']} - Bet: {bet['bet_type']}, Confidence: {bet['confidence']:.2f}")
+        
+        def visualize_weather_impact(df):
+            print("Visualization module not available. Skipping weather impact visualization.")
 
 def parse_args():
     """Parse command line arguments."""
@@ -37,6 +57,10 @@ def parse_args():
                         help='Starting year for data collection')
     parser.add_argument('--end-year', type=int, default=2023, 
                         help='Ending year for data collection')
+    parser.add_argument('--use-existing-games', action='store_true',
+                        help='Use existing game data files and only fetch missing years')
+    parser.add_argument('--use-existing-weather', action='store_true', 
+                        help='Use existing weather data and only fetch missing dates')
     parser.add_argument('--train', action='store_true', 
                         help='Train a new model')
     parser.add_argument('--analyze', action='store_true', 
@@ -52,30 +76,135 @@ def parse_args():
     
     return parser.parse_args()
 
-def fetch_historical_data(start_year, end_year):
+def fetch_historical_data(start_year, end_year, use_existing=True):
     """
     Fetch historical MLB game data from reliable sources.
     
     Args:
         start_year (int): First season to collect
         end_year (int): Last season to collect
+        use_existing (bool): Whether to use existing game data and only fetch missing years
         
     Returns:
         DataFrame: Processed game data
     """
     print(f"Fetching MLB game data from {start_year} to {end_year}...")
     
+    # Check for cached data first
+    cache_file = f"{DATA_DIR}/mlb_games_{start_year}_{end_year}.csv"
+    
+    # If existing file exists with the exact same date range, just load it
+    if use_existing and os.path.exists(cache_file):
+        print(f"Loading cached game data from {cache_file}")
+        return pd.read_csv(cache_file, parse_dates=['date'])
+    
+    # Check for other existing game data files
+    existing_games_df = None
+    if use_existing:
+        # Find all mlb_games_*.csv files
+        game_files = [f for f in os.listdir(DATA_DIR) if f.startswith("mlb_games_") and f.endswith(".csv")]
+        
+        if game_files:
+            # Choose the most comprehensive file
+            print("Found existing game data files:")
+            for i, file in enumerate(game_files):
+                print(f"  {i+1}. {file}")
+            
+            # Parse the date ranges from filenames
+            existing_ranges = []
+            for file in game_files:
+                match = re.search(r'mlb_games_(\d{4})_(\d{4})\.csv', file)
+                if match:
+                    file_start_year = int(match.group(1))
+                    file_end_year = int(match.group(2))
+                    existing_ranges.append((file_start_year, file_end_year, file))
+            
+            # Load existing data if it overlaps with requested range
+            if existing_ranges:
+                # Sort by start year and then by end year
+                existing_ranges.sort(key=lambda x: (x[0], -x[1]))
+                
+                # Check which years we already have data for
+                years_covered = set()
+                for file_start, file_end, file in existing_ranges:
+                    for year in range(file_start, file_end + 1):
+                        if file_start <= year <= file_end:
+                            years_covered.add(year)
+                
+                # Determine which years are missing
+                requested_years = set(range(start_year, end_year + 1))
+                missing_years = sorted(requested_years - years_covered)
+                
+                if not missing_years:
+                    print("All requested years already exist in data files")
+                    # Load and merge all needed files
+                    dfs_to_merge = []
+                    for file_start, file_end, file in existing_ranges:
+                        if any(file_start <= year <= file_end for year in requested_years):
+                            file_path = os.path.join(DATA_DIR, file)
+                            df = pd.read_csv(file_path, parse_dates=['date'])
+                            # Filter to only include the requested years
+                            df['year'] = pd.to_datetime(df['date']).dt.year
+                            df = df[df['year'].between(start_year, end_year)]
+                            df = df.drop('year', axis=1)
+                            dfs_to_merge.append(df)
+                    
+                    if dfs_to_merge:
+                        merged_df = pd.concat(dfs_to_merge, ignore_index=True)
+                        # Remove duplicates if any
+                        merged_df = merged_df.drop_duplicates(subset=['date', 'home_team', 'away_team'])
+                        # Sort by date
+                        merged_df = merged_df.sort_values('date')
+                        # Save as new cache file for this specific range
+                        merged_df.to_csv(cache_file, index=False)
+                        print(f"Created merged game data file {cache_file} with {len(merged_df)} games")
+                        return merged_df
+                else:
+                    print(f"Missing years: {missing_years}")
+                    # Load existing data for the years we have
+                    dfs_to_merge = []
+                    for file_start, file_end, file in existing_ranges:
+                        if any(file_start <= year <= file_end for year in requested_years):
+                            file_path = os.path.join(DATA_DIR, file)
+                            df = pd.read_csv(file_path, parse_dates=['date'])
+                            # Filter to only include the requested years
+                            df['year'] = pd.to_datetime(df['date']).dt.year
+                            df = df[df['year'].between(start_year, end_year)]
+                            df = df.drop('year', axis=1)
+                            dfs_to_merge.append(df)
+                    
+                    if dfs_to_merge:
+                        existing_games_df = pd.concat(dfs_to_merge, ignore_index=True)
+                        # Remove duplicates if any
+                        existing_games_df = existing_games_df.drop_duplicates(subset=['date', 'home_team', 'away_team'])
+                        print(f"Loaded {len(existing_games_df)} existing game records")
+                        
+                        # Update the years to fetch - only fetch missing years
+                        years_to_fetch = missing_years
+                    else:
+                        years_to_fetch = list(range(start_year, end_year + 1))
+            else:
+                years_to_fetch = list(range(start_year, end_year + 1))
+        else:
+            years_to_fetch = list(range(start_year, end_year + 1))
+    else:
+        years_to_fetch = list(range(start_year, end_year + 1))
+    
     # Current year - we shouldn't try to fetch beyond this
     current_year = datetime.now().year
     
     # Validate year range - limit to completed seasons
-    if end_year > current_year - 1:
-        print(f"Warning: Limiting to {current_year - 1} for reliable completed season data.")
-        end_year = current_year - 1
+    years_to_fetch = [year for year in years_to_fetch if year <= current_year]
+    
+    if not years_to_fetch:
+        print("No additional years to fetch")
+        return existing_games_df
+    
+    print(f"Fetching data for years: {years_to_fetch}")
     
     try:
         import pybaseball
-        # Enable cache
+        # Enable caching to reduce API calls
         try:
             pybaseball.cache.enable()
         except:
@@ -83,6 +212,7 @@ def fetch_historical_data(start_year, end_year):
     except ImportError:
         print("pybaseball not installed. Installing now...")
         import subprocess
+        import sys
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pybaseball"])
         import pybaseball
     
@@ -94,17 +224,17 @@ def fetch_historical_data(start_year, end_year):
     
     all_games = []
     
-    for year in range(start_year, end_year + 1):
+    for year in years_to_fetch:
         print(f"Processing {year} season...")
         
         for team in teams:
             try:
                 print(f"Fetching schedule for {team} {year}...")
                 
-                # Get team's schedule
+                # Get team's schedule (removed parse_dates parameter)
                 team_schedule = pybaseball.schedule_and_record(year, team)
                 
-                # Fix date parsing issues by manual parsing
+                # Manually parse dates after retrieving the data
                 if 'Date' in team_schedule.columns:
                     date_series = []
                     for date_str in team_schedule['Date']:
@@ -131,7 +261,7 @@ def fetch_historical_data(start_year, end_year):
                         date_series.append(date)
                     
                     team_schedule['parsed_date'] = date_series
-                    
+                
                 # Filter for completed regular season games
                 completed_games = team_schedule[
                     team_schedule['R'].notna() & 
@@ -168,14 +298,14 @@ def fetch_historical_data(start_year, end_year):
                                 away_score = int(game['RA'])
                                 total_runs = home_score + away_score
                             except:
-                                print(f"Invalid score for {team} vs {game['Opponent']} on {game_date}")
+                                print(f"Invalid score for {team} vs {game['Opp']} on {game_date}")
                                 continue
                             
                             # Add to games list
                             all_games.append({
                                 'date': game_date,
                                 'home_team': team,
-                                'away_team': game['Opponent'],
+                                'away_team': game['Opp'],
                                 'home_score': home_score,
                                 'away_score': away_score,
                                 'total_runs': total_runs,
@@ -193,26 +323,55 @@ def fetch_historical_data(start_year, end_year):
                 print(f"Error fetching data for {team} {year}: {e}")
     
     # Create DataFrame from all games
-    if all_games:
-        games_df = pd.DataFrame(all_games)
-        games_df['date'] = pd.to_datetime(games_df['date'])
-        games_df = games_df.sort_values('date')
+    new_games_df = pd.DataFrame(all_games) if all_games else None
+    
+    # Combine with existing data if available
+    if existing_games_df is not None and new_games_df is not None and len(new_games_df) > 0:
+        # Ensure date is in datetime format for both DataFrames
+        if 'date' in new_games_df.columns:
+            new_games_df['date'] = pd.to_datetime(new_games_df['date'])
         
-        # Save to disk
-        games_df.to_csv(f"{DATA_DIR}/mlb_games_{start_year}_{end_year}.csv", index=False)
-        print(f"Saved {len(games_df)} games to CSV.")
-        
-        return games_df
+        # Combine the DataFrames
+        games_df = pd.concat([existing_games_df, new_games_df], ignore_index=True)
+        # Remove duplicates if any
+        games_df = games_df.drop_duplicates(subset=['date', 'home_team', 'away_team'])
+        print(f"Combined {len(existing_games_df)} existing records with {len(new_games_df)} new records")
+    elif new_games_df is not None and len(new_games_df) > 0:
+        games_df = new_games_df
+    elif existing_games_df is not None:
+        games_df = existing_games_df
     else:
         print("No games collected. Please check your network connection and try again.")
         return None
+    
+    # Ensure date is in datetime format
+    games_df['date'] = pd.to_datetime(games_df['date'])
+    
+    # Sort by date
+    games_df = games_df.sort_values('date')
+    
+    # Save to disk - both specific cache file and a complete file
+    games_df.to_csv(cache_file, index=False)
+    
+    # Also save as a year-specific file for future reuse
+    for year in years_to_fetch:
+        year_df = games_df[games_df['date'].dt.year == year]
+        if len(year_df) > 0:
+            year_file = f"{DATA_DIR}/mlb_games_{year}_{year}.csv"
+            year_df.to_csv(year_file, index=False)
+            print(f"Saved {len(year_df)} games for {year} to {year_file}")
+    
+    print(f"Saved {len(games_df)} games to {cache_file}")
+    
+    return games_df
 
-def fetch_weather_data(games_df):
+def fetch_weather_data(games_df, use_existing=True):
     """
     Fetch weather data for games using Open-Meteo API.
     
     Args:
         games_df (DataFrame): Games with stadium location information
+        use_existing (bool): Whether to use existing weather data file
         
     Returns:
         DataFrame: Weather data for each game
@@ -227,12 +386,36 @@ def fetch_weather_data(games_df):
     try:
         from weather_data import fetch_historical_weather
         print("Using dedicated weather data module...")
-        return fetch_historical_weather(games_df)
-    except ImportError:
-        print("Weather data module not found, using basic implementation...")
+        return fetch_historical_weather(games_df, use_existing=use_existing)
+    except Exception as e:
+        print(f"Error using weather data module: {e}")
+        print("Falling back to basic implementation...")
     
     # Basic implementation when enhanced module not available
     weather_list = []
+    
+    # Check for existing weather data
+    existing_weather_df = None
+    existing_file = f"{DATA_DIR}/weather_data.csv"
+    
+    if use_existing and os.path.exists(existing_file):
+        print(f"Loading existing weather data from {existing_file}")
+        existing_weather_df = pd.read_csv(existing_file)
+        print(f"Loaded {len(existing_weather_df)} existing weather records")
+        
+        # Convert date to datetime if it's not already
+        if 'date' in existing_weather_df.columns:
+            existing_weather_df['date'] = pd.to_datetime(existing_weather_df['date'])
+            
+        # Create a set of date-stadium combinations we already have
+        existing_combinations = set()
+        if existing_weather_df is not None and 'date' in existing_weather_df.columns and 'stadium' in existing_weather_df.columns:
+            for _, row in existing_weather_df.iterrows():
+                date_str = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
+                stadium = row['stadium']
+                existing_combinations.add((date_str, stadium))
+            
+            print(f"Found {len(existing_combinations)} unique date-stadium combinations in existing data")
     
     # Group by stadium to reduce API calls
     stadium_groups = games_df.groupby(['stadium', 'stadium_lat', 'stadium_lon'])
@@ -241,7 +424,23 @@ def fetch_weather_data(games_df):
         print(f"Processing weather for {stadium} ({len(stadium_games)} games)")
         
         # Get unique dates for this stadium
-        dates = pd.to_datetime(stadium_games['date']).dt.strftime('%Y-%m-%d').unique()
+        if 'date' in stadium_games.columns:
+            all_dates = pd.to_datetime(stadium_games['date']).dt.strftime('%Y-%m-%d').unique()
+            
+            # Filter out dates we already have
+            if use_existing and existing_weather_df is not None:
+                dates = [date for date in all_dates if (date, stadium) not in existing_combinations]
+                print(f"Need to fetch {len(dates)} out of {len(all_dates)} dates for {stadium}")
+            else:
+                dates = all_dates
+        else:
+            print(f"No date column found for {stadium}")
+            continue
+        
+        # Skip if we have all dates for this stadium
+        if len(dates) == 0:
+            print(f"All dates for {stadium} already exist in data, skipping")
+            continue
         
         # Process in chunks of 100 dates to avoid too long URLs
         chunk_size = 100
@@ -354,8 +553,22 @@ def fetch_weather_data(games_df):
                 for date_str in date_chunk:
                     weather_list.append(generate_synthetic_weather(date_str, stadium))
     
-    # Create DataFrame from weather data
-    weather_df = pd.DataFrame(weather_list)
+    # Create DataFrame from new weather data
+    new_weather_df = pd.DataFrame(weather_list)
+    
+    # Combine with existing data if available
+    if existing_weather_df is not None and len(new_weather_df) > 0:
+        # Ensure date is in datetime format for both DataFrames
+        if 'date' in new_weather_df.columns:
+            new_weather_df['date'] = pd.to_datetime(new_weather_df['date'])
+        
+        # Combine the DataFrames
+        weather_df = pd.concat([existing_weather_df, new_weather_df], ignore_index=True)
+        print(f"Combined {len(existing_weather_df)} existing records with {len(new_weather_df)} new records")
+    elif len(new_weather_df) > 0:
+        weather_df = new_weather_df
+    else:
+        weather_df = existing_weather_df if existing_weather_df is not None else pd.DataFrame()
     
     # Fill missing values with reasonable estimates
     numeric_cols = ['temperature', 'feels_like', 'humidity', 'pressure', 
@@ -368,7 +581,7 @@ def fetch_weather_data(games_df):
             weather_df[col].fillna(weather_df[col].median(), inplace=True)
     
     # Save to disk
-    weather_df.to_csv(f"{DATA_DIR}/weather_data.csv", index=False)
+    weather_df.to_csv(existing_file, index=False)
     print(f"Saved weather data for {len(weather_df)} games.")
     
     return weather_df
@@ -588,10 +801,10 @@ def main():
     # Fetch or load data
     if args.fetch_data:
         # Fetch new data
-        games_df = fetch_historical_data(args.start_year, args.end_year)
+        games_df = fetch_historical_data(args.start_year, args.end_year, use_existing=args.use_existing_games)
         
         if games_df is not None and not games_df.empty:
-            weather_df = fetch_weather_data(games_df)
+            weather_df = fetch_weather_data(games_df, use_existing=args.use_existing_weather)
             odds_df = generate_synthetic_odds(games_df)
             merged_data = merge_datasets(games_df, weather_df, odds_df)
         else:

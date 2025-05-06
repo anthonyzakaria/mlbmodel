@@ -1,943 +1,1087 @@
 """
-Enhanced MLB Weather Model with LightGBM and automatic fallback
+Enhanced MLB Weather Model implementation.
+This file provides advanced modeling capabilities for MLB games with weather factors.
 """
 
 import os
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import pickle
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 import seaborn as sns
+import requests
+import json
+import warnings
+from config import STADIUM_MAPPING
 
-# Try to import LightGBM first, fall back to GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.inspection import permutation_importance
+
+# Try to import various modeling libraries with fallbacks
 try:
     import lightgbm as lgb
-    LIGHTGBM_AVAILABLE = True
+    HAS_LIGHTGBM = True
     print("Using LightGBM for modeling")
-except ImportError as e:
-    print(f"LightGBM import error: {e}")
-    print("Falling back to GradientBoostingRegressor from scikit-learn")
-    from sklearn.ensemble import GradientBoostingRegressor
-    LIGHTGBM_AVAILABLE = False
-except OSError as e:
-    print(f"LightGBM OSError: {e}")
-    print("This is likely due to missing OpenMP library (libomp) on macOS.")
-    print("Install it with: brew install libomp")
-    print("Falling back to GradientBoostingRegressor from scikit-learn")
-    from sklearn.ensemble import GradientBoostingRegressor
-    LIGHTGBM_AVAILABLE = False
+except ImportError:
+    HAS_LIGHTGBM = False
+    
+try:
+    import xgboost as xgb
+    HAS_XGBOOST = True
+    if not HAS_LIGHTGBM:
+        print("Using XGBoost for modeling")
+except ImportError:
+    HAS_XGBOOST = False
 
-from config import DATA_DIR, STADIUM_MAPPING, BALLPARK_FACTORS
+if not (HAS_LIGHTGBM or HAS_XGBOOST):
+    # Fall back to sklearn models
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    print("Using scikit-learn for modeling")
+
+# Import configuration
+from config import DATA_DIR, ODDS_API_KEY, BALLPARK_FACTORS, WEATHER_THRESHOLDS
 
 class MLBAdvancedModel:
-    """Advanced machine learning model for MLB run predictions based on weather."""
+    """Enhanced MLB Weather Model that incorporates advanced weather and ballpark factors."""
     
-    def __init__(self, data_dir=DATA_DIR):
-        """Initialize the MLB Advanced Model."""
-        self.data_dir = data_dir
-        self.model = None
-        self.feature_names = None
-        self.scaler = None
+    def __init__(self):
+        """Initialize the MLB Weather Model with advanced features."""
+        # Model data
         self.merged_data = None
+        self.model = None
+        self.scaler = None
+        self.features = None
+        self.model_type = None
+        self.timestamp = None
         
-        # Create data directory if it doesn't exist
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+        # Set model type based on available libraries
+        if HAS_LIGHTGBM:
+            self.model_type = "lightgbm"
+        elif HAS_XGBOOST:
+            self.model_type = "xgboost"
+        else:
+            self.model_type = "sklearn"
     
-    def prepare_features(self, data=None, target_col='total_runs', test_size=0.2, random_state=42):
+    def prepare_features(self, data):
         """
-        Prepare features for modeling with enhanced feature engineering.
+        Prepare features for model training or prediction, ensuring all derived features are consistently created.
         
         Args:
-            data (DataFrame): Merged dataset with game, weather, and team data
-            target_col (str): Column to use as target variable
-            test_size (float): Fraction of data to use for testing
-            random_state (int): Random seed for reproducibility
+            data (DataFrame): Raw data for feature preparation
             
         Returns:
-            tuple: (X_train, X_test, y_train, y_test, feature_names)
+            DataFrame: Data with all features prepared
         """
-        # Use provided data or instance data
-        if data is None:
-            if self.merged_data is None:
-                raise ValueError("No data provided and no instance data available")
-            data = self.merged_data
-        
-        if len(data) == 0:
-            raise ValueError("Input data is empty")
-        
-        # FEATURE ENGINEERING
-        # ==========================================
-        
-        # Create a copy to avoid modifying original
+        # Make a copy to avoid modifying the original data
         df = data.copy()
         
-        # Basic meteorological features
-        base_weather_features = []
-        for feature in ['temperature', 'humidity', 'wind_speed', 
-                        'precipitation', 'cloud_cover', 'pressure']:
-            if feature in df.columns:
-                base_weather_features.append(feature)
-        
-        # Enhanced weather features
-        weather_features = []
-        
-        # Temperature features
+        # Ensure all expected columns exist
         if 'temperature' in df.columns:
+            # Add temperature based features
             df['temperature_squared'] = df['temperature'] ** 2
-            weather_features.append('temperature_squared')
-            
-            # Hot/cold indicators
             df['is_hot'] = (df['temperature'] > 85).astype(int)
-            df['is_cold'] = (df['temperature'] < 50).astype(int)
-            weather_features.extend(['is_hot', 'is_cold'])
+            df['is_cold'] = (df['temperature'] < 55).astype(int)
+        else:
+            # Add missing columns with default values
+            df['temperature_squared'] = 0
+            df['is_hot'] = 0
+            df['is_cold'] = 0
         
-        # Add temperature/humidity interaction
+        # Add humidity based features
         if 'temperature' in df.columns and 'humidity' in df.columns:
             df['temp_humidity_interaction'] = df['temperature'] * df['humidity'] / 100
-            weather_features.append('temp_humidity_interaction')
+        else:
+            df['temp_humidity_interaction'] = 0
         
-        # Wind features
+        # Add wind based features
         if 'wind_speed' in df.columns:
-            # High wind indicator
             df['high_wind'] = (df['wind_speed'] > 10).astype(int)
-            weather_features.append('high_wind')
+        else:
+            df['high_wind'] = 0
         
-        # Wind direction effects from one-hot encoded columns
-        wind_cols = [col for col in df.columns if col.startswith('wind_') 
-                    and col not in ['wind_speed', 'wind_direction', 'wind_cardinal']]
-        weather_features.extend(wind_cols)
+        # Ensure all wind direction features exist
+        wind_directions = ['wind_N', 'wind_NE', 'wind_E', 'wind_SE', 
+                          'wind_S', 'wind_SW', 'wind_W', 'wind_NW']
         
-        # Stadium/ballpark features
-        ballpark_features = []
+        for wind_dir in wind_directions:
+            if wind_dir not in df.columns:
+                df[wind_dir] = 0
         
-        if 'ballpark_factor' in df.columns:
-            ballpark_features.append('ballpark_factor')
+        # Add wind effect features if they don't exist
+        if 'wind_effect' not in df.columns:
+            df['wind_effect'] = 0
+        if 'wind_blowing_out' not in df.columns:
+            df['wind_blowing_out'] = 0
+        if 'wind_blowing_in' not in df.columns:
+            df['wind_blowing_in'] = 0
+        if 'wind_blowing_crossfield' not in df.columns:
+            df['wind_blowing_crossfield'] = 0
         
-        # Team performance features (if available)
-        team_features = []
+        # Add month if it doesn't exist
+        if 'month' not in df.columns and 'date' in df.columns:
+            df['month'] = pd.to_datetime(df['date']).dt.month
+        elif 'month' not in df.columns:
+            df['month'] = datetime.now().month  # Use current month as default
         
-        for col in df.columns:
-            if 'team_' in col and col not in ['home_team', 'away_team']:
-                team_features.append(col)
+        # Add ballpark factor if missing
+        if 'ballpark_factor' not in df.columns and 'stadium' in df.columns:
+            df['ballpark_factor'] = df['stadium'].map(
+                {name: factors['base'] for name, factors in BALLPARK_FACTORS.items()}
+            ).fillna(1.0)
+        elif 'ballpark_factor' not in df.columns:
+            df['ballpark_factor'] = 1.0  # Default neutral park factor
         
-        # Time features
-        time_features = []
+        return df
+    
+    def train_model(self):
+        """Train the MLB Weather Model using prepared features."""
+        if self.merged_data is None or len(self.merged_data) == 0:
+            print("No data available for training.")
+            return False
         
-        if 'month' in df.columns:
-            time_features.append('month')
+        # Prepare data for modeling
+        model_data = self.prepare_features(self.merged_data)
         
-        # Odds/line features
-        odds_features = []
+        # Select features for modeling
+        self.features = [
+            'temperature', 'humidity', 'wind_speed', 'precipitation', 
+            'cloud_cover', 'pressure', 'temperature_squared', 
+            'is_hot', 'is_cold', 'temp_humidity_interaction', 
+            'high_wind', 'wind_effect', 'wind_blowing_out', 
+            'wind_blowing_in', 'wind_blowing_crossfield',
+            'wind_E', 'wind_N', 'wind_NE', 'wind_NW', 
+            'wind_S', 'wind_SE', 'wind_SW', 'wind_W',
+            'ballpark_factor', 'month', 'over_under_line'
+        ]
         
-        if 'over_under_line' in df.columns:
-            odds_features.append('over_under_line')
+        print(f"Using {len(self.features)} features: {self.features}")
         
-        # Combine all feature groups
-        all_features = (
-            base_weather_features + 
-            weather_features + 
-            ballpark_features + 
-            team_features + 
-            time_features + 
-            odds_features
+        # Get selected features if they exist in the data
+        available_features = [f for f in self.features if f in model_data.columns]
+        
+        if len(available_features) < len(self.features):
+            print(f"Warning: Only {len(available_features)} of {len(self.features)} features available for training.")
+        
+        X = model_data[available_features]
+        y = model_data['total_runs']
+        
+        # Split data into training and testing sets
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
         )
         
-        # Keep only features that exist in the dataset
-        feature_cols = [col for col in all_features if col in df.columns]
-        
-        # Print feature selection info
-        print(f"Using {len(feature_cols)} features: {feature_cols}")
-        
-        # Create feature matrix
-        X = df[feature_cols].copy()
-        
-        # Handle missing values
-        X = X.fillna(X.median())
-        
-        # Target variable
-        y = df[target_col]
-        
-        # Split data chronologically if possible
-        if 'date' in df.columns:
-            # Sort by date
-            df = df.sort_values('date')
-            
-            # Use specified percentage for training, rest for testing
-            train_size = int(len(df) * (1 - test_size))
-            train_idx = df.index[:train_size]
-            test_idx = df.index[train_size:]
-            
-            X_train = X.loc[train_idx]
-            X_test = X.loc[test_idx]
-            y_train = y.loc[train_idx]
-            y_test = y.loc[test_idx]
+        # Scale features for certain model types
+        if self.model_type.lower() != 'lightgbm' and self.model_type.lower() != 'xgboost':
+            self.scaler = StandardScaler()
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            X_test_scaled = self.scaler.transform(X_test)
         else:
-            # Random split
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=random_state
-            )
+            X_train_scaled = X_train
+            X_test_scaled = X_test
         
-        # Store feature names for later use
-        self.feature_names = feature_cols
+        # Train the appropriate model type
+        print(f"Training {self.model_type} model...")
         
-        return X_train, X_test, y_train, y_test, feature_cols
-    
-    def train_model(self, X_train=None, y_train=None):
-        """
-        Train the model using the best available algorithm.
-        
-        Args:
-            X_train (DataFrame): Training features
-            y_train (Series): Training target
+        if self.model_type.lower() == 'lightgbm':
+            params = {
+                'objective': 'regression',
+                'metric': 'rmse',
+                'num_leaves': 31,
+                'learning_rate': 0.05,
+                'feature_fraction': 0.9,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 5,
+                'verbose': -1
+            }
             
-        Returns:
-            object: Trained model
-        """
-        # If features not provided, prepare them
-        if X_train is None or y_train is None:
-            X_train, X_test, y_train, y_test, feature_cols = self.prepare_features()
-        
-        # Create scaler
-        self.scaler = StandardScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        
-        # Choose model based on availability
-        if LIGHTGBM_AVAILABLE:
-            print("Training LightGBM model...")
-            model = lgb.LGBMRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=5,
-                num_leaves=31,
-                min_child_samples=20,
+            train_data = lgb.Dataset(X_train, label=y_train)
+            self.model = lgb.train(params, train_data, num_boost_round=1000)
+            
+        elif self.model_type.lower() == 'xgboost':
+            params = {
+                'objective': 'reg:squarederror',
+                'eval_metric': 'rmse',
+                'max_depth': 6,
+                'eta': 0.05,
+                'subsample': 0.8,
+                'colsample_bytree': 0.9
+            }
+            
+            dtrain = xgb.DMatrix(X_train, label=y_train)
+            self.model = xgb.train(params, dtrain, num_boost_round=1000)
+            
+        else:  # sklearn fallback
+            self.model = GradientBoostingRegressor(
+                n_estimators=200, 
+                learning_rate=0.05, 
+                max_depth=4, 
                 random_state=42
             )
-        else:
-            print("Training GradientBoostingRegressor model...")
-            model = GradientBoostingRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=4,
-                random_state=42
-            )
+            self.model.fit(X_train_scaled, y_train)
         
-        # Train model
-        model.fit(X_train_scaled, y_train)
+        # Evaluate the model
+        self.evaluate_model(X_test, y_test)
         
-        # Create pipeline for convenience
-        self.model = model
+        # Update timestamp
+        self.timestamp = datetime.now()
         
         # Save model
         self.save_model()
         
-        return model
+        return True
     
-    def evaluate(self, X_test=None, y_test=None):
+    def evaluate_model(self, X_test, y_test):
         """
-        Evaluate model performance on test data.
+        Evaluate the model performance.
         
         Args:
             X_test (DataFrame): Test features
-            y_test (Series): Test target
-            
-        Returns:
-            dict: Performance metrics
+            y_test (Series): Test target values
         """
         if self.model is None:
-            raise ValueError("Model must be trained before evaluation")
-        
-        # If test data not provided, use feature preparation
-        if X_test is None or y_test is None:
-            _, X_test, _, y_test, _ = self.prepare_features()
-        
-        # Scale test data
-        X_test_scaled = self.scaler.transform(X_test)
+            print("Model not trained or loaded.")
+            return None
         
         # Make predictions
-        y_pred = self.model.predict(X_test_scaled)
+        if self.model_type.lower() == 'xgboost':
+            dtest = xgb.DMatrix(X_test)
+            y_pred = self.model.predict(dtest)
+        elif self.model_type.lower() == 'lightgbm':
+            y_pred = self.model.predict(X_test)
+        else:
+            X_test_scaled = self.scaler.transform(X_test)
+            y_pred = self.model.predict(X_test_scaled)
         
         # Calculate metrics
-        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         mae = mean_absolute_error(y_test, y_pred)
-        rmse = np.sqrt(mse)
         r2 = r2_score(y_test, y_pred)
         
-        # Betting-specific metrics
-        if 'over_under_line' in X_test.columns:
-            over_under_lines = X_test['over_under_line']
-            
-            # Actual over/under results
-            actual_over = y_test > over_under_lines
-            actual_under = y_test < over_under_lines
-            actual_push = y_test == over_under_lines
-            
-            # Predicted over/under
-            pred_over = y_pred > over_under_lines
-            pred_under = y_pred < over_under_lines
-            
-            # Calculate accuracy (excluding pushes)
-            non_push = ~actual_push
-            correct_over = (pred_over & actual_over)
-            correct_under = (pred_under & actual_under)
-            correct_bets = correct_over | correct_under
-            
-            over_accuracy = np.sum(correct_over) / np.sum(actual_over) if np.sum(actual_over) > 0 else 0
-            under_accuracy = np.sum(correct_under) / np.sum(actual_under) if np.sum(actual_under) > 0 else 0
-            overall_accuracy = np.sum(correct_bets[non_push]) / np.sum(non_push) if np.sum(non_push) > 0 else 0
-        else:
-            over_accuracy = np.nan
-            under_accuracy = np.nan
-            overall_accuracy = np.nan
-        
-        print(f"Model performance:")
-        print(f"MSE: {mse:.4f}")
-        print(f"MAE: {mae:.4f}")
+        print(f"Model Evaluation:")
         print(f"RMSE: {rmse:.4f}")
-        print(f"R²: {r2:.4f}")
-        if not np.isnan(overall_accuracy):
-            print(f"Betting accuracy: {overall_accuracy:.4f}")
-            print(f"  - Over accuracy: {over_accuracy:.4f}")
-            print(f"  - Under accuracy: {under_accuracy:.4f}")
+        print(f"MAE: {mae:.4f}")
+        print(f"R-squared: {r2:.4f}")
+        
+        # Calculate over/under accuracy
+        avg_line = X_test['over_under_line'].mean()
+        
+        over_indices = y_test > avg_line
+        under_indices = y_test < avg_line
+        
+        if sum(over_indices) > 0:
+            over_accuracy = sum((y_pred > avg_line) & over_indices) / sum(over_indices)
+            print(f"Over Prediction Accuracy: {over_accuracy:.4f}")
+            
+        if sum(under_indices) > 0:
+            under_accuracy = sum((y_pred < avg_line) & under_indices) / sum(under_indices)
+            print(f"Under Prediction Accuracy: {under_accuracy:.4f}")
         
         return {
-            'mse': mse,
-            'mae': mae,
             'rmse': rmse,
-            'r2': r2,
-            'over_accuracy': over_accuracy,
-            'under_accuracy': under_accuracy,
-            'overall_accuracy': overall_accuracy
+            'mae': mae,
+            'r2': r2
         }
+    
+    def save_model(self):
+        """Save the trained model to disk."""
+        if self.model is None:
+            print("No model to save.")
+            return False
+        
+        model_path = f"{DATA_DIR}/advanced_mlb_model.pkl"
+        
+        model_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'features': self.features,
+            'model_type': self.model_type,
+            'timestamp': self.timestamp
+        }
+        
+        with open(model_path, 'wb') as f:
+            pickle.dump(model_data, f)
+        
+        print(f"Model saved to {model_path}")
+        return True
+    
+    def load_model(self):
+        """Load a trained model from disk."""
+        model_path = f"{DATA_DIR}/advanced_mlb_model.pkl"
+        
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        
+        with open(model_path, 'rb') as f:
+            model_data = pickle.load(f)
+        
+        self.model = model_data['model']
+        self.scaler = model_data.get('scaler')
+        self.features = model_data.get('features')
+        self.model_type = model_data.get('model_type')
+        self.timestamp = model_data.get('timestamp')
+        
+        print(f"Model loaded from {model_path}")
+        if self.timestamp:
+            print(f"Model timestamp: {self.timestamp}")
+        
+        return True
     
     def predict(self, features):
         """
-        Make predictions with the trained model.
+        Make predictions using the trained model.
         
         Args:
             features (DataFrame): Features for prediction
             
         Returns:
-            ndarray: Predicted values
+            array: Predicted values
         """
         if self.model is None:
-            raise ValueError("Model must be trained before prediction")
+            print("Model not trained or loaded.")
+            return None
         
-        # Ensure features match training features
-        if self.feature_names is not None:
-            # Get intersection of available features
-            common_features = [f for f in self.feature_names if f in features.columns]
-            
-            if len(common_features) < len(self.feature_names):
-                print(f"Warning: {len(self.feature_names) - len(common_features)} features are missing.")
-            
-            # Use only available features
-            features = features[common_features].copy()
-            
-            # Fill missing values
-            features = features.fillna(features.median())
+        # Prepare features
+        prepared_features = self.prepare_features(features)
         
-        # Scale features
+        # Ensure all required features are present
+        for feature in self.features:
+            if feature not in prepared_features.columns:
+                print(f"Warning: Feature '{feature}' not found in data, adding with zeros")
+                prepared_features[feature] = 0
+        
+        # Select only the features used in the model
+        model_features = prepared_features[self.features]
+        
+        # Scale features if a scaler exists
         if hasattr(self, 'scaler') and self.scaler is not None:
-            scaled_features = self.scaler.transform(features)
+            scaled_features = self.scaler.transform(model_features)
         else:
-            # If no scaler available, use features as-is
-            scaled_features = features
+            scaled_features = model_features
         
         # Make predictions
-        predictions = self.model.predict(scaled_features)
+        if self.model_type.lower() == 'xgboost':
+            dmatrix = xgb.DMatrix(scaled_features)
+            predictions = self.model.predict(dmatrix)
+        elif self.model_type.lower() == 'lightgbm':
+            predictions = self.model.predict(scaled_features)
+        else:
+            predictions = self.model.predict(scaled_features)
         
         return predictions
     
     def analyze_feature_importance(self):
         """
-        Analyze which features have the biggest impact on predictions.
+        Analyze and visualize feature importance.
         
         Returns:
-            DataFrame: Feature importance rankings
+            DataFrame: Feature importance
         """
         if self.model is None:
-            raise ValueError("Model must be trained before analyzing feature importance")
-        
-        if hasattr(self.model, 'feature_importances_'):
-            importances = self.model.feature_importances_
-            
-            # Create DataFrame of feature importances
-            importance_df = pd.DataFrame({
-                'Feature': self.feature_names,
-                'Importance': importances
-            }).sort_values('Importance', ascending=False)
-            
-            # Plot feature importances
-            plt.figure(figsize=(10, 8))
-            sns.barplot(x='Importance', y='Feature', data=importance_df)
-            plt.title('MLB Run Scoring Feature Importance')
-            plt.tight_layout()
-            plt.savefig(f"{self.data_dir}/feature_importance.png")
-            
-            return importance_df
-        else:
-            print("Feature importance not available for this model type")
+            print("Model not trained or loaded.")
             return None
+        
+        # Extract feature importance based on model type
+        if self.model_type.lower() == 'lightgbm':
+            importance = self.model.feature_importance()
+            importance_df = pd.DataFrame({
+                'Feature': self.features,
+                'Importance': importance
+            })
+        elif self.model_type.lower() == 'xgboost':
+            importance = self.model.get_score(importance_type='gain')
+            importance_df = pd.DataFrame({
+                'Feature': list(importance.keys()),
+                'Importance': list(importance.values())
+            })
+        else:  # sklearn models
+            importance = self.model.feature_importances_
+            importance_df = pd.DataFrame({
+                'Feature': self.features,
+                'Importance': importance
+            })
+        
+        # Sort by importance
+        importance_df = importance_df.sort_values('Importance', ascending=False)
+        
+        # Visualize
+        try:
+            plt.figure(figsize=(12, 8))
+            sns.barplot(x='Importance', y='Feature', data=importance_df.head(15))
+            plt.title('Feature Importance')
+            plt.tight_layout()
+            plt.savefig(f"{DATA_DIR}/feature_importance.png")
+            plt.close()
+        except Exception as e:
+            print(f"Error creating visualization: {e}")
+        
+        return importance_df
     
-    def find_betting_opportunities(self, data=None, confidence_threshold=0.5):
+    def find_betting_opportunities(self, confidence_threshold=0.6):
         """
-        Find potential betting opportunities based on model predictions.
+        Find betting opportunities in historical data.
         
         Args:
-            data (DataFrame): Game data with features (None to use test data)
-            confidence_threshold (float): Minimum difference between prediction and line
+            confidence_threshold (float): Threshold for confidence to consider a bet
             
         Returns:
-            DataFrame: Recommended bets
+            DataFrame: Betting opportunities
         """
         if self.model is None:
-            raise ValueError("Model must be trained before finding opportunities")
+            print("Model not trained or loaded.")
+            return None
         
-        # If no data provided, use test data from feature preparation
-        if data is None:
-            _, X_test, _, y_test, _ = self.prepare_features()
-            test_idx = X_test.index
-            test_data = self.merged_data.loc[test_idx].copy()
-        else:
-            test_data = data.copy()
+        if self.merged_data is None or len(self.merged_data) == 0:
+            print("No data available for analysis.")
+            return None
+        
+        # Prepare the test data - use a portion not used in training
+        # Use games from the most recent 20% of the dataset
+        test_data = self.merged_data.sort_values('date').tail(int(len(self.merged_data) * 0.2)).copy()
+        
+        # Apply feature preparation
+        test_data = self.prepare_features(test_data)
+        
+        # Make sure all features exist
+        available_features = [f for f in self.features if f in test_data.columns]
+        missing_features = [f for f in self.features if f not in test_data.columns]
+        
+        if len(missing_features) > 0:
+            print(f"Warning: Using {len(available_features)} of {len(self.features)} model features")
+            print(f"Warning: {len(missing_features)} features are missing.")
+            
+            # Add missing features with zeros
+            for feature in missing_features:
+                test_data[feature] = 0
+        
+        # Make sure all model features are present
+        test_features = test_data[self.features]
         
         # Make predictions
-        if self.feature_names is not None:
-            # Get intersection of available features
-            common_features = [f for f in self.feature_names if f in test_data.columns]
-            
-            if len(common_features) < len(self.feature_names):
-                print(f"Warning: Using {len(common_features)} of {len(self.feature_names)} model features")
-            
-            # Use only available features
-            test_features = test_data[common_features].copy()
-            
-            # Fill missing values
-            test_features = test_features.fillna(test_features.median())
-        else:
-            # Use all numeric features if feature names not stored
-            test_features = test_data.select_dtypes(include=['number'])
-        
-        # Add predictions
         test_data['predicted_runs'] = self.predict(test_features)
         
-        # Calculate difference from betting line
-        if 'over_under_line' in test_data.columns:
-            test_data['pred_diff'] = test_data['predicted_runs'] - test_data['over_under_line']
-            
-            # Find opportunities where prediction differs from line by more than threshold
-            opportunities = test_data[abs(test_data['pred_diff']) > confidence_threshold].copy()
-            
-            # Recommend bet type
-            opportunities['recommended_bet'] = opportunities['pred_diff'].apply(
-                lambda x: 'OVER' if x > 0 else 'UNDER'
+        # Calculate edge and confidence
+        test_data['predicted_vs_line'] = test_data['predicted_runs'] - test_data['over_under_line']
+        
+        # Calculate standard deviation of errors
+        std_error = np.sqrt(mean_squared_error(
+            test_data['total_runs'], 
+            test_data['predicted_runs']
+        ))
+        
+        # Calculate z-score of the edge
+        test_data['edge_zscore'] = abs(test_data['predicted_vs_line']) / std_error
+        
+        # Calculate confidence (probability of correct side)
+        from scipy.stats import norm
+        test_data['confidence'] = test_data['edge_zscore'].apply(
+            lambda z: norm.cdf(z)
+        )
+        
+        # Determine bet direction
+        test_data['bet_type'] = np.where(
+            test_data['predicted_vs_line'] > 0, 
+            'Over', 
+            'Under'
+        )
+        
+        # Determine if bet was correct
+        test_data['bet_result'] = np.where(
+            (test_data['bet_type'] == 'Over') & (test_data['total_runs'] > test_data['over_under_line']),
+            1,  # Over bet wins
+            np.where(
+                (test_data['bet_type'] == 'Under') & (test_data['total_runs'] < test_data['over_under_line']),
+                1,  # Under bet wins
+                np.where(
+                    test_data['total_runs'] == test_data['over_under_line'],
+                    0,  # Push
+                    -1  # Loss
+                )
+            )
+        )
+        
+        # Filter for opportunities with high confidence
+        opportunities = test_data[test_data['confidence'] >= confidence_threshold].copy()
+        
+        # Calculate overall win percentage
+        if len(opportunities) > 0:
+            win_pct = sum(opportunities['bet_result'] == 1) / len(opportunities)
+            print(f"Found {len(opportunities)} potential betting opportunities with {win_pct:.1%} win rate")
+        else:
+            print("No betting opportunities found.")
+        
+        # Add weather impact assessment
+        if 'temperature' in opportunities.columns:
+            # Mark extreme weather conditions
+            opportunities['extreme_temp'] = (
+                (opportunities['temperature'] > 90) | 
+                (opportunities['temperature'] < 50)
             )
             
-            # Add confidence column
-            opportunities['confidence'] = abs(opportunities['pred_diff'])
-            
-            # Add result column for historical data
-            if 'total_runs' in opportunities.columns:
-                opportunities['bet_correct'] = (
-                    ((opportunities['recommended_bet'] == 'OVER') & 
-                    (opportunities['total_runs'] > opportunities['over_under_line'])) |
-                    ((opportunities['recommended_bet'] == 'UNDER') & 
-                    (opportunities['total_runs'] < opportunities['over_under_line']))
-                ).astype(int)
-                
-                # Calculate accuracy if we have results
-                accuracy = opportunities['bet_correct'].mean()
-                print(f"Betting model accuracy: {accuracy:.4f}")
-            
-            # Sort by confidence
-            opportunities = opportunities.sort_values('confidence', ascending=False)
-            
-            # Save to disk if historical data
-            if 'total_runs' in opportunities.columns:
-                opportunities.to_csv(f"{self.data_dir}/betting_opportunities.csv", index=False)
-            
-            return opportunities
-        else:
-            print("No over/under lines found in data")
-            return test_data[['date', 'home_team', 'away_team', 'predicted_runs']]
+            # Check if high winds
+            if 'wind_speed' in opportunities.columns:
+                opportunities['high_winds'] = opportunities['wind_speed'] > 15
+        
+        return opportunities
     
-    def backtest_strategy(self, bet_size=100.0, kelly=False):
+    def backtest_strategy(self, start_date=None, end_date=None, kelly=False):
         """
-        Backtest the betting strategy with realistic parameters.
+        Backtest the betting strategy.
         
         Args:
-            bet_size (float): Standard bet size in dollars
+            start_date (str): Start date for backtest
+            end_date (str): End date for backtest
             kelly (bool): Whether to use Kelly criterion for bet sizing
             
         Returns:
-            DataFrame: Bet results and performance metrics
+            DataFrame: Backtest results
         """
-        # Find betting opportunities
+        # Find opportunities
         opportunities = self.find_betting_opportunities()
         
-        if len(opportunities) == 0:
-            print("No betting opportunities found.")
+        if opportunities is None or len(opportunities) == 0:
+            print("No opportunities found for backtesting.")
             return None
         
-        # Start with initial bankroll
-        initial_bankroll = 10000.0
-        bankroll = initial_bankroll
-        bets = []
+        # Filter by date range if provided
+        if start_date:
+            opportunities = opportunities[opportunities['date'] >= pd.to_datetime(start_date)]
         
-        # Process each bet
-        for idx, bet in opportunities.iterrows():
-            # Get odds based on bet type
-            if bet['recommended_bet'] == 'OVER' and 'over_odds' in bet:
-                american_odds = bet['over_odds']
-            elif bet['recommended_bet'] == 'UNDER' and 'under_odds' in bet:
-                american_odds = bet['under_odds']
-            else:
-                american_odds = -110  # Default
-            
-            decimal_odds = self._american_to_decimal(american_odds)
-            
-            # True edge (predicted vs line)
-            true_edge = abs(bet['predicted_runs'] - bet['over_under_line'])
-            
-            # Determine bet size
-            if kelly:
-                # Kelly criterion: bet size = bankroll * edge / odds
-                edge = true_edge / bet['over_under_line']  # Estimated edge
-                bet_amount = bankroll * edge / (decimal_odds - 1)
-                # Limit Kelly to 5% of bankroll for safety
-                bet_amount = min(bet_amount, bankroll * 0.05)
-            else:
-                bet_amount = bet_size
-            
-            # Ensure bet doesn't exceed bankroll
-            bet_amount = min(bet_amount, bankroll)
-            
-            # Calculate outcome with vig
-            if bet['bet_correct'] == 1:
-                profit = bet_amount * (decimal_odds - 1)
-            else:
-                profit = -bet_amount
-            
-            # Add transaction costs (typically 2-5%)
-            transaction_cost = bet_amount * 0.02
-            profit -= transaction_cost
-            
-            # Update bankroll
-            bankroll += profit
-            
-            # Record bet details
-            bets.append({
-                'date': bet['date'],
-                'game': f"{bet['away_team']} @ {bet['home_team']}",
-                'bet_type': bet['recommended_bet'],
-                'over_under_line': bet['over_under_line'],
-                'predicted_runs': bet['predicted_runs'],
-                'actual_runs': bet['total_runs'],
-                'odds': decimal_odds,
-                'edge': true_edge,
-                'bet_amount': bet_amount,
-                'profit': profit,
-                'bankroll': bankroll,
-                'correct': bet['bet_correct']
-            })
-            
-            # Check for bankruptcy
-            if bankroll <= 0:
-                print("Bankrupt! Stopping backtest.")
-                break
+        if end_date:
+            opportunities = opportunities[opportunities['date'] <= pd.to_datetime(end_date)]
         
-        # Create DataFrame of bet results
-        results_df = pd.DataFrame(bets)
+        # Sort chronologically
+        opportunities = opportunities.sort_values('date')
+        
+        # Initialize bankroll
+        starting_bankroll = 1000
+        current_bankroll = starting_bankroll
+        
+        # Bet sizing
+        if kelly:
+            # Use Kelly criterion for bet sizing
+            print("Using Kelly criterion for bet sizing...")
+            
+            # Calculate win probability and edge
+            opportunities['win_prob'] = opportunities['confidence']
+            opportunities['edge'] = (opportunities['win_prob'] * 1.9) - 1  # Assume -110 odds (1.91)
+            
+            # Calculate Kelly percentage (cap at 5%)
+            opportunities['kelly_pct'] = np.clip(
+                opportunities['win_prob'] - ((1 - opportunities['win_prob']) / 1.9),
+                0,
+                0.05
+            )
+            
+            # Calculate bet amount
+            opportunities['bet_amount'] = opportunities.apply(
+                lambda row: row['kelly_pct'] * current_bankroll,
+                axis=1
+            )
+        else:
+            # Use flat betting (1% of bankroll)
+            opportunities['bet_amount'] = starting_bankroll * 0.01
+        
+        # Calculate returns
+        # Assume -110 odds (1.91 decimal)
+        opportunities['bet_return'] = np.where(
+            opportunities['bet_result'] == 1,  # Win
+            opportunities['bet_amount'] * 0.91,  # Return = 1.91 - 1.0 (initial stake)
+            np.where(
+                opportunities['bet_result'] == 0,  # Push
+                0,
+                -opportunities['bet_amount']  # Loss
+            )
+        )
+        
+        # Calculate cumulative bankroll
+        opportunities['bankroll'] = starting_bankroll + opportunities['bet_return'].cumsum()
         
         # Calculate performance metrics
-        bet_count = len(results_df)
-        winning_bets = len(results_df[results_df['profit'] > 0])
-        win_rate = winning_bets / bet_count if bet_count > 0 else 0
-        roi = (bankroll - initial_bankroll) / initial_bankroll * 100
+        total_bets = len(opportunities)
+        winning_bets = sum(opportunities['bet_result'] == 1)
+        losing_bets = sum(opportunities['bet_result'] == -1)
+        push_bets = sum(opportunities['bet_result'] == 0)
         
-        print(f"Backtest Results:")
-        print(f"Total Bets: {bet_count}")
-        print(f"Win Rate: {win_rate:.4f}")
-        print(f"ROI: {roi:.2f}%")
-        print(f"Final Bankroll: ${bankroll:.2f}")
+        win_pct = winning_bets / (winning_bets + losing_bets) if (winning_bets + losing_bets) > 0 else 0
         
-        # Plot equity curve
-        plt.figure(figsize=(10, 6))
-        plt.plot(results_df['bankroll'])
-        plt.axhline(y=initial_bankroll, color='r', linestyle='--')
-        plt.title('Betting Strategy Equity Curve')
-        plt.xlabel('Bet Number')
-        plt.ylabel('Bankroll ($)')
-        plt.grid(True)
-        plt.savefig(f"{self.data_dir}/equity_curve.png")
+        final_bankroll = opportunities['bankroll'].iloc[-1] if len(opportunities) > 0 else starting_bankroll
+        roi = (final_bankroll - starting_bankroll) / starting_bankroll
         
-        # Save results to disk
-        results_df.to_csv(f"{self.data_dir}/backtest_results.csv", index=False)
+        print("\nBacktest Results:")
+        print(f"Period: {opportunities['date'].min()} to {opportunities['date'].max()}")
+        print(f"Total Bets: {total_bets}")
+        print(f"Wins: {winning_bets} ({win_pct:.1%})")
+        print(f"Losses: {losing_bets}")
+        print(f"Pushes: {push_bets}")
+        print(f"Starting Bankroll: ${starting_bankroll}")
+        print(f"Final Bankroll: ${final_bankroll:.2f}")
+        print(f"ROI: {roi:.2%}")
         
-        return results_df
-    
-    def get_todays_betting_recommendations(self, confidence_threshold=0.15):
-        """
-        Get betting recommendations for today's MLB games using real odds.
-
-        Parameters:
-            confidence_threshold (float): Minimum difference between predicted runs and line
-
-        Returns:
-            DataFrame: Recommended bets for today's games
-        """
-        print("Fetching today's MLB odds...")
-
-        # Get today's date
-        today = datetime.now().strftime('%Y-%m-%d')
-
-        # Fetch current MLB odds from API
-        import requests
-        from config import ODDS_API_KEY
-        
-        url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds?apiKey={ODDS_API_KEY}&regions=us&markets=totals"
-
+        # Create chart of bankroll over time
         try:
-            response = requests.get(url)
-            print(f"API Response: {response.status_code}")
-
-            if response.status_code == 200:
-                games_odds = []
-                current_odds = response.json()
-                print(f"Found {len(current_odds)} MLB games with odds")
-
-                for game in current_odds:
-                    try:
-                        # Extract teams
-                        home_team = game.get('home_team')
-                        away_team = game.get('away_team')
-
-                        # Check if we have mappings for these teams
-                        from config import TEAM_NAME_MAP
-                        home_team_abbr = None
-                        away_team_abbr = None
-                        
-                        # Try to find team abbreviations
-                        for full_name, abbr in TEAM_NAME_MAP.items():
-                            if full_name == home_team:
-                                home_team_abbr = abbr
-                            if full_name == away_team:
-                                away_team_abbr = abbr
-                        
-                        # Skip if we can't map the teams
-                        if not home_team_abbr or not away_team_abbr:
-                            print(f"Could not map team names: {home_team} vs {away_team}")
-                            continue
-
-                        # Get game date/time
-                        game_datetime = game.get('commence_time')
-                        if game_datetime:
-                            game_date = datetime.fromisoformat(game_datetime.replace('Z', '+00:00'))
-                        else:
-                            game_date = datetime.now()
-
-                        # Get over/under line and odds
-                        over_under_line = None
-                        over_odds = None
-                        under_odds = None
-
-                        # Navigate to find totals market
-                        for bookmaker in game.get('bookmakers', []):
-                            for market in bookmaker.get('markets', []):
-                                if market.get('key') == 'totals':
-                                    for outcome in market.get('outcomes', []):
-                                        if outcome.get('name') == 'Over':
-                                            over_under_line = float(outcome.get('point'))
-                                            over_odds = float(outcome.get('price'))
-                                        elif outcome.get('name') == 'Under':
-                                            under_odds = float(outcome.get('price'))
-
-                        if over_under_line and over_odds and under_odds:
-                            # Get stadium info
-                            stadium_info = STADIUM_MAPPING.get(home_team_abbr, None)
-
-                            if stadium_info:
-                                # Fetch weather for the stadium
-                                # Try to use weather_data module if available
-                                try:
-                                    from weather_data import get_current_weather
-                                    weather = get_current_weather(home_team_abbr, game_date)
-                                except ImportError:
-                                    # Fallback to basic weather fetching
-                                    weather = self._fetch_current_weather(
-                                        stadium_info['lat'], 
-                                        stadium_info['lon'],
-                                        stadium_info['name']
-                                    )
-
-                                if weather:
-                                    # Create game features
-                                    features = {
-                                        'date': game_date,
-                                        'home_team': home_team_abbr,
-                                        'away_team': away_team_abbr,
-                                        'over_under_line': over_under_line,
-                                        'over_odds': over_odds,
-                                        'under_odds': under_odds,
-                                        'stadium': stadium_info['name'],
-                                        'month': game_date.month
-                                    }
-                                    
-                                    # Add weather features
-                                    features.update(weather)
-                                    
-                                    # Add ballpark factor
-                                    features['ballpark_factor'] = BALLPARK_FACTORS.get(
-                                        stadium_info['name'], {'base': 1.0}
-                                    )['base']
-
-                                    # Append to games list
-                                    games_odds.append(features)
-                    except Exception as e:
-                        print(f"Error processing game: {e}")
-
-                if games_odds:
-                    # Convert to DataFrame
-                    games_df = pd.DataFrame(games_odds)
-
-                    # Find betting opportunities
-                    opportunities = self.find_betting_opportunities(
-                        games_df, 
-                        confidence_threshold=confidence_threshold
-                    )
-                    
-                    if opportunities is not None and len(opportunities) > 0:
-                        print(f"Found {len(opportunities)} betting opportunities for today")
-                        return opportunities
-                    else:
-                        print("No betting opportunities found with current threshold.")
-                        return None
-                else:
-                    print("No valid games with odds found.")
-                    return None
+            plt.figure(figsize=(12, 6))
+            plt.plot(opportunities['date'], opportunities['bankroll'])
+            plt.axhline(y=starting_bankroll, color='r', linestyle='--')
+            plt.title('Bankroll Over Time')
+            plt.xlabel('Date')
+            plt.ylabel('Bankroll ($)')
+            plt.grid(True)
+            plt.savefig(f"{DATA_DIR}/backtest_results.png")
+            plt.close()
+            
+            # Create win rate by weather condition chart
+            if 'extreme_temp' in opportunities.columns and 'high_winds' in opportunities.columns:
+                # Group by weather conditions
+                weather_groups = [
+                    ('All Bets', opportunities),
+                    ('Extreme Temp', opportunities[opportunities['extreme_temp']]),
+                    ('Normal Temp', opportunities[~opportunities['extreme_temp']]),
+                    ('High Winds', opportunities[opportunities['high_winds']]),
+                    ('Low Winds', opportunities[~opportunities['high_winds']])
+                ]
+                
+                # Calculate win rates
+                win_rates = []
+                for name, group in weather_groups:
+                    if len(group) > 0:
+                        win_rate = sum(group['bet_result'] == 1) / len(group)
+                        win_rates.append({
+                            'Condition': name,
+                            'Win Rate': win_rate,
+                            'Count': len(group)
+                        })
+                
+                # Create chart
+                win_rate_df = pd.DataFrame(win_rates)
+                
+                plt.figure(figsize=(10, 6))
+                ax = sns.barplot(x='Condition', y='Win Rate', data=win_rate_df)
+                
+                # Add count labels
+                for i, row in enumerate(win_rate_df.itertuples()):
+                    ax.text(i, row._2 + 0.01, f"n={row.Count}", ha='center')
+                
+                plt.title('Win Rate by Weather Condition')
+                plt.ylabel('Win Rate')
+                plt.ylim(0, 1)
+                plt.grid(True, axis='y')
+                plt.savefig(f"{DATA_DIR}/weather_win_rates.png")
+                plt.close()
+        except Exception as e:
+            print(f"Error creating visualization: {e}")
+        
+        return opportunities
+    
+    def get_todays_betting_recommendations(self, confidence_threshold=0.6):
+        """
+        Get today's MLB betting recommendations.
+        
+        Args:
+            confidence_threshold (float): Threshold for confidence to consider a bet
+            
+        Returns:
+            DataFrame: Today's betting opportunities
+        """
+        if self.model is None:
+            print("Model not trained or loaded.")
+            return None
+        
+        # Get today's games and odds
+        today_games = self.fetch_todays_odds()
+        
+        if today_games is None or len(today_games) == 0:
+            print("No games found for today.")
+            return None
+        
+        # Get weather for game locations
+        try:
+            today_games = self.add_weather_to_games(today_games)
+        except Exception as e:
+            print(f"Error adding weather data: {e}")
+        
+        # Prepare the data for prediction
+        today_features = self.prepare_features(today_games)
+        
+        # Make sure all features exist
+        available_features = [f for f in self.features if f in today_features.columns]
+        missing_features = [f for f in self.features if f not in today_features.columns]
+        
+        if len(missing_features) > 0:
+            print(f"Warning: Using {len(available_features)} of {len(self.features)} model features")
+            if len(missing_features) > 5:
+                print(f"Warning: {len(missing_features)} features are missing.")
             else:
-                print(f"Failed to get odds. Status code: {response.status_code}")
-                return None
+                print(f"Warning: {len(missing_features)} features are missing: {missing_features}")
+            
+            # Add missing features with zeros
+            for feature in missing_features:
+                today_features[feature] = 0
+        
+        # Make sure all model features are present
+        today_model_features = today_features[self.features]
+        
+        # Make predictions
+        try:
+            today_games['predicted_runs'] = self.predict(today_features)
+            
+            # Calculate edge and confidence
+            today_games['predicted_vs_line'] = today_games['predicted_runs'] - today_games['over_under_line']
+            
+            # Calculate standard deviation of errors (use a reasonable estimate)
+            std_error = 2.5  # Typical RMSE for run prediction
+            
+            # Calculate z-score of the edge
+            today_games['edge_zscore'] = abs(today_games['predicted_vs_line']) / std_error
+            
+            # Calculate confidence (probability of correct side)
+            from scipy.stats import norm
+            today_games['confidence'] = today_games['edge_zscore'].apply(
+                lambda z: norm.cdf(z)
+            )
+            
+            # Determine bet direction
+            today_games['bet_type'] = np.where(
+                today_games['predicted_vs_line'] > 0, 
+                'Over', 
+                'Under'
+            )
+            
+            # Format for better readability
+            today_games['confidence_pct'] = (today_games['confidence'] * 100).round(1)
+            today_games['prediction'] = today_games['predicted_runs'].round(1)
+            
+            # Filter for opportunities with high confidence
+            opportunities = today_games[today_games['confidence'] >= confidence_threshold].copy()
+            
+            if len(opportunities) > 0:
+                print(f"Found {len(opportunities)} potential betting opportunities for today")
+                
+                # Sort by confidence
+                opportunities = opportunities.sort_values('confidence', ascending=False)
+                
+                # Add a rating system (5★ = highest confidence)
+                opportunities['stars'] = pd.cut(
+                    opportunities['confidence'],
+                    bins=[confidence_threshold, 0.7, 0.8, 0.9, 1.0],
+                    labels=['2★', '3★', '4★', '5★'],
+                    include_lowest=True
+                )
+                
+                # Print recommendations
+                print("\nToday's Betting Recommendations:")
+                for _, game in opportunities.iterrows():
+                    stars = game.get('stars', '')
+                    print(f"{game['away_team']} @ {game['home_team']} - {game['bet_type']} {game['over_under_line']} ({game['confidence_pct']}% confidence) {stars}")
+                    print(f"  Predicted: {game['prediction']} runs | Weather: {game.get('weather_description', 'N/A')}")
+                    print()
+            else:
+                print("No betting opportunities found for today that meet the confidence threshold.")
+            
+            return opportunities
+            
         except Exception as e:
             print(f"Error fetching odds: {e}")
             return None
     
-    def _fetch_current_weather(self, lat, lon, stadium_name):
+    def fetch_todays_odds(self):
         """
-        Fetch current weather for a location using Open-Meteo API.
+        Fetch today's MLB games and betting odds.
+        
+        Returns:
+            DataFrame: Today's games with odds
+        """
+        print("Fetching today's MLB odds...")
+        
+        # API parameters
+        api_key = ODDS_API_KEY
+        sport = 'baseball_mlb'
+        regions = 'us'
+        markets = 'totals'
+        oddsFormat = 'american'
+        date_format = 'iso'
+        
+        odds_response = requests.get(
+            f'https://api.the-odds-api.com/v4/sports/{sport}/odds',
+            params={
+                'api_key': api_key,
+                'regions': regions,
+                'markets': markets,
+                'oddsFormat': oddsFormat,
+                'dateFormat': date_format,
+            }
+        )
+        
+        if odds_response.status_code != 200:
+            print(f"Failed to get odds: status_code {odds_response.status_code}, response body {odds_response.text}")
+            return None
+        
+        odds_json = odds_response.json()
+        print(f"API Response: {odds_response.status_code}")
+        
+        # Process the odds data
+        games_list = []
+        
+        for game in odds_json:
+            try:
+                # Get teams
+                home_team = None
+                away_team = None
+                
+                for team in game['home_team'], game['away_team']:
+                    # Map team name to abbreviation
+                    abbr = self.get_team_abbreviation(team)
+                    
+                    if team == game['home_team']:
+                        home_team = abbr
+                    else:
+                        away_team = abbr
+                
+                # Get totals (over/under)
+                over_under_line = None
+                over_odds = None
+                under_odds = None
+                
+                if 'bookmakers' in game and len(game['bookmakers']) > 0:
+                    # Use first bookmaker with totals market
+                    for bookie in game['bookmakers']:
+                        for market in bookie['markets']:
+                            if market['key'] == 'totals':
+                                for outcome in market['outcomes']:
+                                    if outcome['name'] == 'Over':
+                                        over_under_line = float(outcome['point'])
+                                        over_odds = int(outcome['price'])
+                                    elif outcome['name'] == 'Under':
+                                        under_odds = int(outcome['price'])
+                                break
+                        if over_under_line is not None:
+                            break
+                
+                # Get game date/time
+                game_date = datetime.fromisoformat(game['commence_time'].replace('Z', '+00:00'))
+                
+                # Convert to local time
+                game_date = game_date.replace(tzinfo=None) - timedelta(hours=4)  # Rough EST conversion
+                
+                # Get stadium info
+                stadium_info = self.get_stadium_info(home_team)
+                
+                # Create game object
+                if home_team and away_team and over_under_line:
+                    games_list.append({
+                        'date': game_date,
+                        'home_team': home_team,
+                        'away_team': away_team,
+                        'over_under_line': over_under_line,
+                        'over_odds': over_odds,
+                        'under_odds': under_odds,
+                        'stadium': stadium_info.get('name', f"{home_team} Stadium"),
+                        'stadium_lat': stadium_info.get('lat'),
+                        'stadium_lon': stadium_info.get('lon'),
+                        'game_id': game['id']
+                    })
+            except Exception as e:
+                print(f"Error processing game: {e}")
+        
+        # Create DataFrame
+        if games_list:
+            games_df = pd.DataFrame(games_list)
+            print(f"Found {len(games_df)} MLB games with odds")
+            return games_df
+        else:
+            print("No games with odds found")
+            return None
+    
+    def add_weather_to_games(self, games_df):
+        """
+        Add weather data to games DataFrame.
         
         Args:
-            lat (float): Latitude
-            lon (float): Longitude
-            stadium_name (str): Stadium name for reference
+            games_df (DataFrame): Games data
             
         Returns:
-            dict: Weather data
+            DataFrame: Games data with weather information
         """
+        if games_df is None or len(games_df) == 0:
+            return games_df
+        
+        # Add weather data
         try:
-            import requests
+            # Import weather module dynamically
+            from weather_data import get_current_weather
             
-            # Build Open-Meteo API URL for current weather
-            url = "https://api.open-meteo.com/v1/forecast"
-            params = {
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,relativehumidity_2m,precipitation,cloudcover,pressure_msl,windspeed_10m,winddirection_10m",
-                "timezone": "America/New_York"
-            }
+            # Add weather for each game
+            weather_list = []
             
-            response = requests.get(url, params=params)
+            for idx, game in games_df.iterrows():
+                try:
+                    # Get weather for stadium at game time
+                    weather = get_current_weather(
+                        game['home_team'], 
+                        game_datetime=game['date']
+                    )
+                    
+                    if weather:
+                        weather_list.append(weather)
+                    else:
+                        # Create empty weather data
+                        weather_list.append({
+                            'temperature': 70,
+                            'humidity': 50,
+                            'wind_speed': 5,
+                            'wind_direction': 0,
+                            'pressure': 1010,
+                            'precipitation': 0,
+                            'cloud_cover': 30,
+                            'weather_condition': 'Unknown',
+                            'weather_description': 'Weather data unavailable'
+                        })
+                except Exception as e:
+                    print(f"Error getting weather for {game['home_team']}: {e}")
+                    # Create empty weather data
+                    weather_list.append({
+                        'temperature': 70,
+                        'humidity': 50,
+                        'wind_speed': 5,
+                        'wind_direction': 0,
+                        'pressure': 1010,
+                        'precipitation': 0,
+                        'cloud_cover': 30,
+                        'weather_condition': 'Unknown',
+                        'weather_description': 'Weather data unavailable'
+                    })
             
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Extract current weather
-                current = data.get("current", {})
-                
-                # Determine weather condition based on cloud cover and precipitation
-                cloud_cover = current.get("cloudcover", 0)
-                precip = current.get("precipitation", 0)
-                
-                if precip > 0.5:
-                    weather_condition = 'Rain'
-                elif precip > 0.1:
-                    weather_condition = 'Drizzle'
-                elif cloud_cover > 80:
-                    weather_condition = 'Clouds'
-                else:
-                    weather_condition = 'Clear'
-                
-                # Create weather dictionary
-                weather = {
-                    'temperature': current.get("temperature_2m", 70) * 9/5 + 32,  # Convert C to F
-                    'humidity': current.get("relativehumidity_2m", 50),
-                    'pressure': current.get("pressure_msl", 1013) / 100,  # Convert Pa to hPa
-                    'wind_speed': current.get("windspeed_10m", 5) * 2.237,  # Convert m/s to mph
-                    'wind_direction': current.get("winddirection_10m", 0),
-                    'cloud_cover': cloud_cover,
-                    'precipitation': precip,
-                    'weather_condition': weather_condition,
-                    'weather_description': f"{weather_condition} with {cloud_cover}% cloud cover"
-                }
-                
-                # Add derived features
-                weather['temperature_squared'] = weather['temperature'] ** 2
-                weather['temp_humidity_interaction'] = weather['temperature'] * weather['humidity'] / 100
-                
-                # Add wind direction features
+            # Convert to DataFrame
+            weather_df = pd.DataFrame(weather_list)
+            
+            # Join with games data
+            for col in weather_df.columns:
+                if col not in games_df.columns:
+                    games_df[col] = weather_df[col].values
+            
+            # Add wind cardinal direction
+            if 'wind_direction' in games_df.columns:
                 def degrees_to_cardinal(deg):
                     dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-                    ix = round(deg / 45) % 8
+                    ix = round(float(deg) / 45) % 8
                     return dirs[ix]
                 
-                cardinal = degrees_to_cardinal(weather['wind_direction'])
+                games_df['wind_cardinal'] = games_df['wind_direction'].apply(
+                    lambda x: degrees_to_cardinal(x) if pd.notnull(x) else 'Unknown'
+                )
                 
-                # Create one-hot encoded wind direction
-                for direction in ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']:
-                    weather[f'wind_{direction}'] = 1 if cardinal == direction else 0
+                # Create dummy variables for wind direction
+                wind_dummies = pd.get_dummies(games_df['wind_cardinal'], prefix='wind')
                 
-                return weather
-            else:
-                print(f"Error fetching weather: {response.status_code}")
-                return self._generate_synthetic_weather(stadium_name)
+                # Add columns to games_df
+                for col in wind_dummies.columns:
+                    games_df[col] = wind_dummies[col]
+        
         except Exception as e:
-            print(f"Error fetching current weather: {e}")
-            return self._generate_synthetic_weather(stadium_name)
+            print(f"Error adding weather data: {e}")
+        
+        return games_df
     
-    def _generate_synthetic_weather(self, stadium_name):
-        """Generate synthetic weather when API fails."""
-        # Current month for seasonal adjustment
-        month = datetime.now().month
+    def get_team_abbreviation(self, team_name):
+        """
+        Get team abbreviation from full team name.
         
-        # Seasonal temperature
-        if 5 <= month <= 9:  # Summer
-            temp = np.random.randint(70, 90)
-        elif month in [4, 10]:  # Spring/Fall
-            temp = np.random.randint(55, 75)
-        else:  # Winter
-            temp = np.random.randint(40, 60)
-        
-        # Generate realistic values
-        humidity = np.random.randint(30, 90)
-        wind_speed = np.random.randint(0, 20)
-        wind_direction = np.random.randint(0, 360)
-        cloud_cover = np.random.randint(0, 100)
-        precipitation = 0.0 if cloud_cover < 70 else np.random.uniform(0, 0.5)
-        
-        # Determine weather condition
-        if precipitation > 0.5:
-            weather_condition = 'Rain'
-        elif precipitation > 0.1:
-            weather_condition = 'Drizzle'
-        elif cloud_cover > 80:
-            weather_condition = 'Clouds'
-        else:
-            weather_condition = 'Clear'
-        
-        # Create basic weather dict
-        weather = {
-            'temperature': temp,
-            'humidity': humidity,
-            'pressure': np.random.randint(990, 1030),
-            'wind_speed': wind_speed,
-            'wind_direction': wind_direction,
-            'cloud_cover': cloud_cover,
-            'precipitation': precipitation,
-            'weather_condition': weather_condition,
-            'weather_description': f"Synthetic {weather_condition}"
+        Args:
+            team_name (str): Full team name
+            
+        Returns:
+            str: Team abbreviation
+        """
+        # Dictionary mapping full team names to abbreviations
+        team_map = {
+            'Arizona Diamondbacks': 'ARI',
+            'Atlanta Braves': 'ATL',
+            'Baltimore Orioles': 'BAL',
+            'Boston Red Sox': 'BOS',
+            'Chicago Cubs': 'CHC',
+            'Chicago White Sox': 'CHW',
+            'Cincinnati Reds': 'CIN',
+            'Cleveland Guardians': 'CLE',
+            'Colorado Rockies': 'COL',
+            'Detroit Tigers': 'DET',
+            'Houston Astros': 'HOU',
+            'Kansas City Royals': 'KCR',
+            'Los Angeles Angels': 'LAA',
+            'Los Angeles Dodgers': 'LAD',
+            'Miami Marlins': 'MIA',
+            'Milwaukee Brewers': 'MIL',
+            'Minnesota Twins': 'MIN',
+            'New York Mets': 'NYM',
+            'New York Yankees': 'NYY',
+            'Oakland Athletics': 'OAK',
+            'Philadelphia Phillies': 'PHI',
+            'Pittsburgh Pirates': 'PIT',
+            'San Diego Padres': 'SDP',
+            'Seattle Mariners': 'SEA',
+            'San Francisco Giants': 'SFG',
+            'St. Louis Cardinals': 'STL',
+            'Tampa Bay Rays': 'TBR',
+            'Texas Rangers': 'TEX',
+            'Toronto Blue Jays': 'TOR',
+            'Washington Nationals': 'WSN'
         }
         
-        # Add derived features
-        weather['temperature_squared'] = weather['temperature'] ** 2
-        weather['temp_humidity_interaction'] = weather['temperature'] * weather['humidity'] / 100
-        
-        # Add wind direction features
-        def degrees_to_cardinal(deg):
-            dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-            ix = round(deg / 45) % 8
-            return dirs[ix]
-        
-        cardinal = degrees_to_cardinal(weather['wind_direction'])
-        
-        # Create one-hot encoded wind direction
-        for direction in ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']:
-            weather[f'wind_{direction}'] = 1 if cardinal == direction else 0
-        
-        return weather
-    
-    def save_model(self, filename='advanced_mlb_model.pkl'):
-        """Save the trained model to disk."""
-        if self.model is None:
-            raise ValueError("No model to save. Please train a model first.")
-        
-        # Create model object with all necessary components
-        model_data = {
-            'model': self.model,
-            'feature_names': self.feature_names,
-            'scaler': self.scaler,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Handle common variations
+        variations = {
+            'Cleveland Indians': 'CLE',
+            'Cleveland Guardians': 'CLE',
+            'LA Angels': 'LAA',
+            'LA Dodgers': 'LAD',
+            'St Louis Cardinals': 'STL',
+            'St.Louis Cardinals': 'STL',
+            'Tampa Bay': 'TBR'
         }
         
-        # Save to disk
-        model_path = f"{self.data_dir}/{filename}"
-        with open(model_path, 'wb') as f:
-            pickle.dump(model_data, f)
+        # Check direct match
+        if team_name in team_map:
+            return team_map[team_name]
         
-        print(f"Model saved to {model_path}")
-        return model_path
+        # Check variations
+        if team_name in variations:
+            return variations[team_name]
+        
+        # Try to match partial names
+        for full_name, abbr in team_map.items():
+            city, nickname = full_name.split(' ', 1)
+            
+            # Check if team_name contains both city and nickname
+            if city in team_name and nickname in team_name:
+                return abbr
+            
+            # Check if nickname matches exactly
+            if team_name == nickname:
+                return abbr
+        
+        # If all else fails, return original
+        return team_name[:3].upper()
     
-    def load_model(self, filename='advanced_mlb_model.pkl'):
-        """Load a trained model from disk."""
-        model_path = f"{self.data_dir}/{filename}"
-        if not os.path.exists(model_path):
-            # Try loading legacy model
-            legacy_path = f"{self.data_dir}/weather_model.pkl"
-            if os.path.exists(legacy_path):
-                print(f"Advanced model not found, loading legacy model from {legacy_path}")
-                model_path = legacy_path
-            else:
-                raise FileNotFoundError(f"No model file found at {model_path} or {legacy_path}")
+    def get_stadium_info(self, team_abbr):
+        """
+        Get stadium information for a team.
         
-        # Load from disk
-        with open(model_path, 'rb') as f:
-            model_data = pickle.load(f)
+        Args:
+            team_abbr (str): Team abbreviation
+            
+        Returns:
+            dict: Stadium information
+        """
+        # Get stadium info from config
+        if team_abbr in STADIUM_MAPPING:
+            return STADIUM_MAPPING[team_abbr]
         
-        # Handle different model formats
-        if isinstance(model_data, dict) and 'model' in model_data:
-            # New format with additional data
-            self.model = model_data['model']
-            self.feature_names = model_data.get('feature_names')
-            self.scaler = model_data.get('scaler')
-            timestamp = model_data.get('timestamp', 'unknown')
-        else:
-            # Legacy format (just the model)
-            self.model = model_data
-            self.feature_names = None
-            self.scaler = None
-            timestamp = 'unknown'
-        
-        print(f"Model loaded from {model_path}")
-        if timestamp != 'unknown':
-            print(f"Model timestamp: {timestamp}")
-        
-        return self.model
-    
-    def _american_to_decimal(self, american_odds):
-        """Convert American odds to decimal format."""
-        if american_odds is None:
-            return 1.91  # Default
-        
-        try:
-            american_odds = float(american_odds)
-            if american_odds > 0:
-                return 1 + (american_odds / 100)
-            else:
-                return 1 + (100 / abs(american_odds))
-        except:
-            return 1.91  # Default if conversion fails
+        # Default values if team not found
+        return {
+            'name': f"{team_abbr} Stadium",
+            'lat': 40.0,  # Default latitude
+            'lon': -75.0,  # Default longitude
+            'dome': False,
+            'retractable_roof': False,
+            'orientation': 0
+        }

@@ -12,13 +12,14 @@ from datetime import datetime, timedelta
 
 from config import DATA_DIR, STADIUM_MAPPING, WEATHER_THRESHOLDS
 
-def fetch_historical_weather(games_df, cache=True):
+def fetch_historical_weather(games_df, cache=True, use_existing=True):
     """
     Fetch historical weather data using Open-Meteo API for game locations and dates.
     
     Args:
         games_df (DataFrame): DataFrame containing game information with stadium and date
         cache (bool): Whether to use cached data if available
+        use_existing (bool): Whether to use existing weather_data.csv and only fetch missing dates
         
     Returns:
         DataFrame: Weather data for all games
@@ -26,51 +27,64 @@ def fetch_historical_weather(games_df, cache=True):
     print("Fetching historical weather data using Open-Meteo API...")
     
     cache_file = f"{DATA_DIR}/open_meteo_weather_cache.csv"
+    existing_file = f"{DATA_DIR}/weather_data.csv"
     
-    # Check if cache exists and should be used
-    if cache and os.path.exists(cache_file):
+    # Check if we should use existing data
+    existing_weather_df = None
+    if use_existing and os.path.exists(existing_file):
+        print(f"Loading existing weather data from {existing_file}")
+        existing_weather_df = pd.read_csv(existing_file)
+        print(f"Loaded {len(existing_weather_df)} existing weather records")
+        
+        # Convert date to datetime if it's not already
+        if 'date' in existing_weather_df.columns:
+            existing_weather_df['date'] = pd.to_datetime(existing_weather_df['date'])
+    
+    # Check if cache exists and should be used (if not using existing data)
+    elif cache and os.path.exists(cache_file):
         print(f"Loading cached weather data from {cache_file}")
         return pd.read_csv(cache_file, parse_dates=['date'])
     
     if games_df is None or len(games_df) == 0:
+        if existing_weather_df is not None:
+            return existing_weather_df
         raise ValueError("Game data must be provided before fetching weather data.")
+    
+    # Create a set of date-stadium combinations we already have
+    existing_combinations = set()
+    if existing_weather_df is not None and 'date' in existing_weather_df.columns and 'stadium' in existing_weather_df.columns:
+        for _, row in existing_weather_df.iterrows():
+            date_str = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
+            stadium = row['stadium']
+            existing_combinations.add((date_str, stadium))
+        
+        print(f"Found {len(existing_combinations)} unique date-stadium combinations in existing data")
     
     weather_list = []
     
     # Group by stadium to reduce API calls
-    if 'stadium' in games_df.columns and 'stadium_lat' in games_df.columns and 'stadium_lon' in games_df.columns:
-        stadium_groups = games_df.groupby(['stadium', 'stadium_lat', 'stadium_lon'])
-    else:
-        # Create groups based on home team using stadium mapping
-        grouped_games = []
-        for _, game in games_df.iterrows():
-            if 'home_team' in game:
-                home_team = game['home_team']
-                if home_team in STADIUM_MAPPING:
-                    stadium_info = STADIUM_MAPPING[home_team]
-                    grouped_games.append({
-                        'stadium': stadium_info['name'],
-                        'stadium_lat': stadium_info['lat'],
-                        'stadium_lon': stadium_info['lon'],
-                        'date': game['date'],
-                        'original_idx': _
-                    })
-        
-        if not grouped_games:
-            raise ValueError("Cannot group games by stadium. Missing required columns.")
-            
-        temp_df = pd.DataFrame(grouped_games)
-        stadium_groups = temp_df.groupby(['stadium', 'stadium_lat', 'stadium_lon'])
+    stadium_groups = games_df.groupby(['stadium', 'stadium_lat', 'stadium_lon'])
     
-    # Process each stadium's games
     for (stadium, lat, lon), stadium_games in stadium_groups:
         print(f"Processing weather for {stadium} ({len(stadium_games)} games)")
         
         # Get unique dates for this stadium
         if 'date' in stadium_games.columns:
-            dates = pd.to_datetime(stadium_games['date']).dt.strftime('%Y-%m-%d').unique()
+            all_dates = pd.to_datetime(stadium_games['date']).dt.strftime('%Y-%m-%d').unique()
+            
+            # Filter out dates we already have
+            if existing_weather_df is not None:
+                dates = [date for date in all_dates if (date, stadium) not in existing_combinations]
+                print(f"Need to fetch {len(dates)} out of {len(all_dates)} dates for {stadium}")
+            else:
+                dates = all_dates
         else:
             print(f"No date column found for {stadium}")
+            continue
+        
+        # Skip if we have all dates for this stadium
+        if len(dates) == 0:
+            print(f"All dates for {stadium} already exist in data, skipping")
             continue
         
         # Get stadium info for context
@@ -250,8 +264,22 @@ def fetch_historical_weather(games_df, cache=True):
                 for date_str in date_chunk:
                     weather_list.append(generate_synthetic_weather(date_str, stadium, is_domed, has_retractable_roof))
     
-    # Create DataFrame from weather data
-    weather_df = pd.DataFrame(weather_list)
+    # Create DataFrame from new weather data
+    new_weather_df = pd.DataFrame(weather_list)
+    
+    # Combine with existing data if available
+    if existing_weather_df is not None and len(new_weather_df) > 0:
+        # Ensure date is in datetime format for both DataFrames
+        if 'date' in new_weather_df.columns:
+            new_weather_df['date'] = pd.to_datetime(new_weather_df['date'])
+        
+        # Combine the DataFrames
+        weather_df = pd.concat([existing_weather_df, new_weather_df], ignore_index=True)
+        print(f"Combined {len(existing_weather_df)} existing records with {len(new_weather_df)} new records")
+    elif len(new_weather_df) > 0:
+        weather_df = new_weather_df
+    else:
+        weather_df = existing_weather_df if existing_weather_df is not None else pd.DataFrame()
     
     # Fill missing values with reasonable estimates
     numeric_cols = ['temperature', 'feels_like', 'humidity', 'pressure', 
@@ -268,6 +296,10 @@ def fetch_historical_weather(games_df, cache=True):
     if cache:
         weather_df.to_csv(cache_file, index=False)
         print(f"Cached weather data to {cache_file}")
+        
+        # Also update the weather_data.csv file
+        weather_df.to_csv(existing_file, index=False)
+        print(f"Updated {existing_file} with {len(weather_df)} records")
     
     # Calculate percentage of real vs synthetic data
     if 'data_source' in weather_df.columns:
