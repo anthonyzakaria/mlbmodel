@@ -297,8 +297,21 @@ def backtest_strategy(opportunities, kelly=False, detailed=False):
     print(f"Starting backtest with ${initial_bankroll:.2f} bankroll")
     print(f"Testing {len(opportunities)} betting opportunities")
     
+    # Add vigorish (juice) to odds
+    standard_vig = 0.0526  # 5.26% for -110 odds
+
+    # Track consecutive losses
+    max_consecutive_losses = 3
+    current_consecutive_losses = 0
+
     # Process each bet
     for _, bet in opportunities.iterrows():
+        # Skip if on losing streak
+        if current_consecutive_losses >= max_consecutive_losses:
+            time.sleep(random.randint(2, 5))  # Simulate waiting period
+            current_consecutive_losses = 0
+            continue
+
         # Get odds based on bet type
         if bet['recommended_bet'] == 'OVER' and 'over_odds' in bet:
             odds = convert_american_to_decimal(bet['over_odds'])
@@ -330,8 +343,10 @@ def backtest_strategy(opportunities, kelly=False, detailed=False):
             # Calculate profit/loss
             if correct:
                 profit = bet_size * (odds - 1)
+                current_consecutive_losses = 0
             else:
                 profit = -bet_size
+                current_consecutive_losses += 1
             
             # Update bankroll
             bankroll += profit
@@ -363,6 +378,11 @@ def backtest_strategy(opportunities, kelly=False, detailed=False):
                 'odds': odds,
                 'bet_size': bet_size
             })
+        
+        # Break if bankroll depleted
+        if bankroll <= 0:
+            print("Warning: Bankruptcy occurred during backtest")
+            break
     
     # Create DataFrame of bet results
     results_df = pd.DataFrame(bets)
@@ -692,3 +712,28 @@ def analyze_weather_patterns(opportunities):
         print(data[['bets', 'win_rate', 'total_profit']])
     
     return results
+
+
+def evaluate_bet_performance(opportunities):
+    """Evaluate performance separately for Over and Under bets."""
+    over_bets = opportunities[opportunities['recommended_bet'] == 'OVER']
+    under_bets = opportunities[opportunities['recommended_bet'] == 'UNDER']
+
+    over_win_rate = over_bets['correct'].mean()
+    under_win_rate = under_bets['correct'].mean()
+
+    print(f"Over Win Rate: {over_win_rate:.2f}")
+    print(f"Under Win Rate: {under_win_rate:.2f}")
+def dynamic_confidence_thresholds(opportunities):
+    """Adjust confidence thresholds for Over and Under bets."""
+
+    print(f"Dynamic Over Threshold: {over_threshold:.2f}")
+    print(f"Dynamic Under Threshold: {under_threshold:.2f}")
+
+    return over_threshold, under_threshold
+    over_bets = opportunities[opportunities['recommended_bet'] == 'OVER']
+    under_bets = opportunities[opportunities['recommended_bet'] == 'UNDER']
+    under_threshold = under_bets['confidence'].quantile(0.75)
+    over_threshold = over_bets['confidence'].quantile(0.75)  # Top 25% confidence
+
+    # Calculate separate thresholds

@@ -187,6 +187,29 @@ def fetch_historical_games(start_year=2022, end_year=2024):
         games_df.to_csv(cache_file, index=False)
         print(f"Saved {len(games_df)} games to CSV.")
         
+        # Add historical odds
+        try:
+            from odds_scraper import OddsScraper
+            scraper = OddsScraper()
+            
+            # Fetch odds for each season
+            for year in range(start_year, end_year + 1):
+                season_start = f"{year}-04-01"  # Approximate season start
+                season_end = f"{year}-10-31"    # Approximate season end
+                
+                odds_df = scraper.fetch_historical_odds(season_start, season_end)
+                
+                if not odds_df.empty:
+                    # Merge odds with games
+                    games_df = pd.merge(
+                        games_df,
+                        odds_df,
+                        on=['date', 'home_team', 'away_team'],
+                        how='left'
+                    )
+        except Exception as e:
+            print(f"Error fetching historical odds: {e}")
+        
         return games_df
     else:
         print("No games data collected. Generating synthetic data...")
@@ -547,3 +570,76 @@ def generate_synthetic_schedule(days=7):
     print(f"Generated {len(schedule_df)} synthetic upcoming games.")
     
     return schedule_df
+
+def fetch_pitcher_stats():
+    """
+    Fetch pitcher statistics from an external source (e.g., API or CSV).
+    
+    Returns:
+        DataFrame: Pitcher stats
+    """
+    print("Fetching pitcher stats...")
+    # Example: Fetch from an API or scrape a website
+    # Save to a CSV for future use
+    pitcher_stats = pd.DataFrame({
+        'pitcher_name': ['Pitcher A', 'Pitcher B'],
+        'ERA': [3.50, 4.20],
+        'WHIP': [1.20, 1.35],
+        'strikeouts_per_9': [9.5, 8.0]
+    })
+    pitcher_stats.to_csv(f"{DATA_DIR}/pitcher_stats.csv", index=False)
+    return pitcher_stats
+
+def fetch_team_stats():
+    """
+    Fetch team batting statistics from an external source (e.g., API or CSV).
+    
+    Returns:
+        DataFrame: Team stats
+    """
+    print("Fetching team stats...")
+    # Example: Fetch from an API or scrape a website
+    # Save to a CSV for future use
+    team_stats = pd.DataFrame({
+        'team_abbr': ['NYY', 'BOS'],
+        'OPS': [0.800, 0.750],
+        'runs_per_game': [5.2, 4.8]
+    })
+    team_stats.to_csv(f"{DATA_DIR}/team_stats.csv", index=False)
+    return team_stats
+
+def fetch_bullpen_stats():
+    """
+    Fetch bullpen performance statistics from an external source (e.g., API or CSV).
+    
+    Returns:
+        DataFrame: Bullpen stats
+    """
+    print("Fetching bullpen stats...")
+    # Example: Fetch from an API or scrape a website
+    # Save to a CSV for future use
+    bullpen_stats = pd.DataFrame({
+        'team_abbr': ['NYY', 'BOS'],
+        'bullpen_ERA': [3.80, 4.10],
+        'bullpen_WHIP': [1.25, 1.30]
+    })
+    bullpen_stats.to_csv(f"{DATA_DIR}/bullpen_stats.csv", index=False)
+    return bullpen_stats
+
+def fetch_recent_performance():
+    """
+    Fetch recent game performance for teams from an external source (e.g., API or CSV).
+    
+    Returns:
+        DataFrame: Recent performance stats
+    """
+    print("Fetching recent performance stats...")
+    # Example: Fetch from an API or scrape a website
+    # Save to a CSV for future use
+    recent_performance = pd.DataFrame({
+        'team_abbr': ['NYY', 'BOS'],
+        'last_5_games_runs': [25, 20],
+        'last_5_games_allowed': [18, 22]
+    })
+    recent_performance.to_csv(f"{DATA_DIR}/recent_performance.csv", index=False)
+    return recent_performance

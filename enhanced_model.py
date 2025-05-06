@@ -136,103 +136,242 @@ class MLBAdvancedModel:
         
         return df
     
+    def add_interaction_features(self, data):
+        """Add interaction features to capture complex relationships."""
+        data['temp_humidity_interaction'] = data['temperature'] * data['humidity'] / 100
+        data['wind_ballpark_interaction'] = data['wind_speed'] * data['ballpark_factor']
+        return data
+
+    def add_baseball_specific_features(self, data):
+        """
+        Add baseball-specific features such as pitcher stats, team batting stats, and bullpen performance.
+        
+        Args:
+            data (DataFrame): Input data with game details
+            
+        Returns:
+            DataFrame: Data with additional baseball-specific features
+        """
+        # Add pitcher stats (ERA, WHIP, strikeouts, etc.)
+        if 'starting_pitcher_home' in data.columns and 'starting_pitcher_away' in data.columns:
+            pitcher_stats = self.fetch_pitcher_stats()
+            data = data.merge(pitcher_stats, left_on='starting_pitcher_home', right_on='pitcher_name', how='left')
+            data = data.rename(columns=lambda col: f"home_{col}" if col not in ['pitcher_name'] else col)
+            data = data.merge(pitcher_stats, left_on='starting_pitcher_away', right_on='pitcher_name', how='left')
+            data = data.rename(columns=lambda col: f"away_{col}" if col not in ['pitcher_name'] else col)
+
+        # Add team batting stats (OPS, runs per game, etc.)
+        if 'home_team' in data.columns and 'away_team' in data.columns:
+            team_stats = self.fetch_team_stats()
+            data = data.merge(team_stats, left_on='home_team', right_on='team_abbr', how='left')
+            data = data.rename(columns=lambda col: f"home_{col}" if col not in ['team_abbr'] else col)
+            data = data.merge(team_stats, left_on='away_team', right_on='team_abbr', how='left')
+            data = data.rename(columns=lambda col: f"away_{col}" if col not in ['team_abbr'] else col)
+
+        # Add bullpen performance (ERA, WHIP, etc.)
+        if 'home_team' in data.columns and 'away_team' in data.columns:
+            bullpen_stats = self.fetch_bullpen_stats()
+            data = data.merge(bullpen_stats, left_on='home_team', right_on='team_abbr', how='left')
+            data = data.rename(columns=lambda col: f"home_{col}" if col not in ['team_abbr'] else col)
+            data = data.merge(bullpen_stats, left_on='away_team', right_on='team_abbr', how='left')
+            data = data.rename(columns=lambda col: f"away_{col}" if col not in ['team_abbr'] else col)
+
+        # Add recent game performance (last 5 games)
+        if 'home_team' in data.columns and 'away_team' in data.columns:
+            recent_performance = self.fetch_recent_performance()
+            data = data.merge(recent_performance, left_on='home_team', right_on='team_abbr', how='left')
+            data = data.rename(columns=lambda col: f"home_{col}" if col not in ['team_abbr'] else col)
+            data = data.merge(recent_performance, left_on='away_team', right_on='team_abbr', how='left')
+            data = data.rename(columns=lambda col: f"away_{col}" if col not in ['team_abbr'] else col)
+
+        return data
+
+    def fetch_pitcher_stats(self):
+        """
+        Fetch pitcher statistics (e.g., ERA, WHIP, strikeouts).
+        
+        Returns:
+            DataFrame: Pitcher stats
+        """
+        # Example: Load from a CSV or API
+        pitcher_stats_file = f"{DATA_DIR}/pitcher_stats.csv"
+        if os.path.exists(pitcher_stats_file):
+            return pd.read_csv(pitcher_stats_file)
+        else:
+            print("Pitcher stats file not found. Please fetch and save pitcher stats.")
+            return pd.DataFrame()
+
+    def fetch_team_stats(self):
+        """
+        Fetch team batting statistics (e.g., OPS, runs per game).
+        
+        Returns:
+            DataFrame: Team stats
+        """
+        # Example: Load from a CSV or API
+        team_stats_file = f"{DATA_DIR}/team_stats.csv"
+        if os.path.exists(team_stats_file):
+            return pd.read_csv(team_stats_file)
+        else:
+            print("Team stats file not found. Please fetch and save team stats.")
+            return pd.DataFrame()
+
+    def fetch_bullpen_stats(self):
+        """
+        Fetch bullpen performance statistics (e.g., ERA, WHIP).
+        
+        Returns:
+            DataFrame: Bullpen stats
+        """
+        # Example: Load from a CSV or API
+        bullpen_stats_file = f"{DATA_DIR}/bullpen_stats.csv"
+        if os.path.exists(bullpen_stats_file):
+            return pd.read_csv(bullpen_stats_file)
+        else:
+            print("Bullpen stats file not found. Please fetch and save bullpen stats.")
+            return pd.DataFrame()
+
+    def fetch_recent_performance(self):
+        """
+        Fetch recent game performance for teams (e.g., last 5 games).
+        
+        Returns:
+            DataFrame: Recent performance stats
+        """
+        # Example: Load from a CSV or API
+        recent_performance_file = f"{DATA_DIR}/recent_performance.csv"
+        if os.path.exists(recent_performance_file):
+            return pd.read_csv(recent_performance_file)
+        else:
+            print("Recent performance file not found. Please fetch and save recent performance stats.")
+            return pd.DataFrame()
+
     def train_model(self):
         """Train the MLB Weather Model using prepared features."""
-        if self.merged_data is None or len(self.merged_data) == 0:
+        if self.merged_data is None:
             print("No data available for training.")
             return False
+
+        # Prepare features
+        data = self.prepare_features(self.merged_data)
         
-        # Prepare data for modeling
-        model_data = self.prepare_features(self.merged_data)
-        
-        # Select features for modeling
+        # Define base features - maintain consistent order
         self.features = [
-            'temperature', 'humidity', 'wind_speed', 'precipitation', 
-            'cloud_cover', 'pressure', 'temperature_squared', 
-            'is_hot', 'is_cold', 'temp_humidity_interaction', 
-            'high_wind', 'wind_effect', 'wind_blowing_out', 
-            'wind_blowing_in', 'wind_blowing_crossfield',
-            'wind_E', 'wind_N', 'wind_NE', 'wind_NW', 
-            'wind_S', 'wind_SE', 'wind_SW', 'wind_W',
-            'ballpark_factor', 'month', 'over_under_line'
+            'temperature', 'humidity', 'wind_speed', 'pressure',
+            'cloud_cover', 'precipitation', 'temperature_squared',
+            'temp_humidity_interaction', 'ballpark_factor',
+            'wind_N', 'wind_NE', 'wind_E', 'wind_SE',
+            'wind_S', 'wind_SW', 'wind_W', 'wind_NW',
+            'is_hot', 'is_cold', 'high_wind', 'month'
         ]
         
-        print(f"Using {len(self.features)} features: {self.features}")
+        # Filter to only available features
+        self.features = [f for f in self.features if f in data.columns]
         
-        # Get selected features if they exist in the data
-        available_features = [f for f in self.features if f in model_data.columns]
+        print(f"Using {len(self.features)} features for training")
         
-        if len(available_features) < len(self.features):
-            print(f"Warning: Only {len(available_features)} of {len(self.features)} features available for training.")
+        # Prepare X and y
+        X = data[self.features].fillna(0)
+        y = data['total_runs'].values
         
-        X = model_data[available_features]
-        y = model_data['total_runs']
-        
-        # Split data into training and testing sets
+        # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
         
-        # Scale features for certain model types
-        if self.model_type.lower() != 'lightgbm' and self.model_type.lower() != 'xgboost':
-            self.scaler = StandardScaler()
-            X_train_scaled = self.scaler.fit_transform(X_train)
-            X_test_scaled = self.scaler.transform(X_test)
-        else:
-            X_train_scaled = X_train
-            X_test_scaled = X_test
+        # Scale features
+        self.scaler = StandardScaler()
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
         
-        # Train the appropriate model type
-        print(f"Training {self.model_type} model...")
-        
-        if self.model_type.lower() == 'lightgbm':
+        # Initialize and train model based on available libraries
+        if self.model_type == "lightgbm" and HAS_LIGHTGBM:
             params = {
                 'objective': 'regression',
                 'metric': 'rmse',
                 'num_leaves': 31,
                 'learning_rate': 0.05,
                 'feature_fraction': 0.9,
-                'bagging_fraction': 0.8,
-                'bagging_freq': 5,
                 'verbose': -1
             }
+            train_data = lgb.Dataset(X_train_scaled, label=y_train)
+            valid_data = lgb.Dataset(X_test_scaled, label=y_test, reference=train_data)
             
-            train_data = lgb.Dataset(X_train, label=y_train)
-            self.model = lgb.train(params, train_data, num_boost_round=1000)
+            callbacks = [
+                lgb.early_stopping(stopping_rounds=50),
+                lgb.log_evaluation(period=100)
+            ]
             
-        elif self.model_type.lower() == 'xgboost':
+            self.model = lgb.train(
+                params,
+                train_data,
+                num_boost_round=1000,
+                valid_sets=[valid_data],
+                callbacks=callbacks
+            )
+            
+            # Make predictions
+            y_pred = self.model.predict(X_test_scaled)
+
+        elif self.model_type == "xgboost" and HAS_XGBOOST:
             params = {
                 'objective': 'reg:squarederror',
                 'eval_metric': 'rmse',
                 'max_depth': 6,
-                'eta': 0.05,
-                'subsample': 0.8,
-                'colsample_bytree': 0.9
+                'learning_rate': 0.05,
+                'subsample': 0.8
             }
+            dtrain = xgb.DMatrix(X_train_scaled, label=y_train)
+            dtest = xgb.DMatrix(X_test_scaled, label=y_test)
             
-            dtrain = xgb.DMatrix(X_train, label=y_train)
-            self.model = xgb.train(params, dtrain, num_boost_round=1000)
+            self.model = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=1000,
+                evals=[(dtest, 'test')],
+                early_stopping_rounds=50,
+                verbose_eval=100
+            )
             
-        else:  # sklearn fallback
+            # Make predictions
+            y_pred = self.model.predict(dtest)
+            
+        else:
+            # Fall back to sklearn GradientBoostingRegressor
             self.model = GradientBoostingRegressor(
-                n_estimators=200, 
-                learning_rate=0.05, 
-                max_depth=4, 
+                n_estimators=100,
+                learning_rate=0.05,
+                max_depth=6,
                 random_state=42
             )
             self.model.fit(X_train_scaled, y_train)
+            
+            # Make predictions
+            y_pred = self.model.predict(X_test_scaled)
         
-        # Evaluate the model
-        self.evaluate_model(X_test, y_test)
+        # Calculate metrics
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
         
-        # Update timestamp
+        # Calculate over/under accuracy
+        over_under_line = data['over_under_line'].values[-len(y_test):]  # Align with test set
+        actual_over = y_test > over_under_line
+        predicted_over = y_pred > over_under_line
+        over_accuracy = np.mean(actual_over == predicted_over)
+
+        print(f"\nModel Evaluation:")
+        print(f"RMSE: {rmse:.4f}")
+        print(f"MAE: {mae:.4f}")
+        print(f"R-squared: {r2:.4f}")
+        print(f"Over/Under Accuracy: {over_accuracy:.4f}")
+
+        # Update timestamp and save
         self.timestamp = datetime.now()
-        
-        # Save model
         self.save_model()
-        
+
         return True
-    
+
     def evaluate_model(self, X_test, y_test):
         """
         Evaluate the model performance.
@@ -329,49 +468,98 @@ class MLBAdvancedModel:
         
         return True
     
-    def predict(self, features):
+    def recalibrate_predictions(self, X, y_actual):
+        """Recalibrate predictions to correct for systematic bias."""
+        y_predicted = self.model.predict(X)
+
+        # Fit a linear regression to adjust predictions
+        from sklearn.linear_model import LinearRegression
+        recalibrator = LinearRegression()
+        recalibrator.fit(y_predicted.reshape(-1, 1), y_actual)
+
+        # Apply recalibration
+        y_recalibrated = recalibrator.predict(y_predicted.reshape(-1, 1))
+        return y_recalibrated
+
+    def predict(self, features, recalibrate_to_vegas_mean=True, vegas_mean=8.59):
         """
-        Make predictions using the trained model.
-        
-        Args:
-            features (DataFrame): Features for prediction
-            
-        Returns:
-            array: Predicted values
+        Make predictions using the trained model, with optional recalibration.
         """
         if self.model is None:
             print("Model not trained or loaded.")
             return None
         
-        # Prepare features
-        prepared_features = self.prepare_features(features)
+        try:
+            # Prepare features
+            prepared_features = self.prepare_features(features)
+            
+            # Select only the features used in the model in the correct order
+            model_features = prepared_features[self.features].copy()
+            
+            # Convert to numpy array if needed
+            if isinstance(model_features, pd.DataFrame):
+                model_features = model_features.values
+                
+            # Ensure we have a 2D array
+            if len(model_features.shape) == 1:
+                model_features = model_features.reshape(1, -1)
+                
+            # Scale features if a scaler exists
+            if hasattr(self, 'scaler') and self.scaler is not None:
+                model_features = self.scaler.transform(model_features)
+            
+            # Make predictions based on model type
+            if self.model_type.lower() == 'lightgbm':
+                predictions = self.model.predict(model_features)
+            elif self.model_type.lower() == 'xgboost':
+                dmatrix = xgb.DMatrix(model_features)
+                predictions = self.model.predict(dmatrix)
+            else:
+                predictions = self.model.predict(model_features)
+            
+            # Recalibrate predictions if needed
+            if recalibrate_to_vegas_mean and len(predictions) > 0:
+                predictions = self._recalibrate_predictions(predictions, target_mean=vegas_mean)
+            
+            return predictions
+            
+        except Exception as e:
+            print(f"Error making predictions: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _recalibrate_predictions(self, predictions, target_mean):
+        """
+        Internal method to recalibrate predictions to align with a target mean.
         
-        # Ensure all required features are present
-        for feature in self.features:
-            if feature not in prepared_features.columns:
-                print(f"Warning: Feature '{feature}' not found in data, adding with zeros")
-                prepared_features[feature] = 0
+        Args:
+            predictions (array): Original model predictions
+            target_mean (float): Target mean to align predictions with
+            
+        Returns:
+            array: Recalibrated predictions
+        """
+        if len(predictions) == 0:
+            return predictions
+            
+        # Ensure predictions is a 1D array
+        predictions = np.asarray(predictions).ravel()
         
-        # Select only the features used in the model
-        model_features = prepared_features[self.features]
-        
-        # Scale features if a scaler exists
-        if hasattr(self, 'scaler') and self.scaler is not None:
-            scaled_features = self.scaler.transform(model_features)
+        # Calculate adjustment
+        original_mean = predictions.mean()
+        if original_mean > 0:  # Avoid division by zero
+            adjustment_factor = target_mean / original_mean
+            recalibrated = predictions * adjustment_factor
         else:
-            scaled_features = model_features
+            recalibrated = predictions
+            
+        print(f"Recalibrating predictions: Original Mean = {original_mean:.2f}, " 
+              f"Target Mean = {target_mean:.2f}, "
+              f"Adjustment Factor = {adjustment_factor:.4f}")
         
-        # Make predictions
-        if self.model_type.lower() == 'xgboost':
-            dmatrix = xgb.DMatrix(scaled_features)
-            predictions = self.model.predict(dmatrix)
-        elif self.model_type.lower() == 'lightgbm':
-            predictions = self.model.predict(scaled_features)
-        else:
-            predictions = self.model.predict(scaled_features)
-        
-        return predictions
-    
+        return recalibrated
+
     def analyze_feature_importance(self):
         """
         Analyze and visualize feature importance.
@@ -523,9 +711,67 @@ class MLBAdvancedModel:
             # Check if high winds
             if 'wind_speed' in opportunities.columns:
                 opportunities['high_winds'] = opportunities['wind_speed'] > 15
+
+        # Add more conservative filters
+        opportunities = opportunities[
+            (opportunities['confidence'] >= confidence_threshold) &
+            (abs(opportunities['predicted_vs_line']) >= 1.0) &  # Minimum edge
+            (opportunities['predicted_runs'] >= 5) &  # Realistic run totals
+            (opportunities['predicted_runs'] <= 15)
+        ].copy()
+
+        # Add uncertainty estimates
+        opportunities['prediction_std'] = self.estimate_prediction_uncertainty(opportunities)
         
+        # Filter based on uncertainty
+        opportunities = opportunities[
+            opportunities['predicted_vs_line'].abs() > 2 * opportunities['prediction_std']
+        ]
+
+        # Calculate Kelly bet sizes
+        if len(opportunities) > 0:
+            opportunities['kelly_fraction'] = opportunities.apply(
+                lambda x: self.calculate_kelly_fraction(
+                    win_prob=x['confidence'],
+                    odds=-110  # Standard odds
+                ),
+                axis=1
+            )
+
+            # Cap Kelly fractions
+            opportunities['kelly_fraction'] = opportunities['kelly_fraction'].clip(0, 0.05)
+
         return opportunities
-    
+
+    def calculate_kelly_fraction(self, win_prob, odds):
+        """Calculate optimal Kelly fraction."""
+        # Convert American odds to decimal
+        if odds > 0:
+            decimal_odds = 1 + (odds / 100)
+        else:
+            decimal_odds = 1 + (100 / abs(odds))
+
+        # Kelly formula
+        q = 1 - win_prob
+        return max(0, (win_prob * decimal_odds - q) / decimal_odds)
+
+    def estimate_prediction_uncertainty(self, data):
+        """Estimate uncertainty in predictions."""
+        if not hasattr(self.model, 'feature_importance'):
+            return pd.Series([1.0] * len(data))  # Default uncertainty
+
+        # Use feature importances to weight feature contributions
+        importance_sum = sum(self.model.feature_importance())
+        normalized_importance = [imp / importance_sum for imp in self.model.feature_importance()]
+
+        # Calculate weighted standard deviation of features
+        weighted_std = np.zeros(len(data))
+        for feat, weight in zip(self.features, normalized_importance):
+            if feat in data.columns:
+                weighted_std += weight * data[feat].std()
+
+        return weighted_std
+
     def backtest_strategy(self, start_date=None, end_date=None, kelly=False):
         """
         Backtest the betting strategy.
@@ -848,7 +1094,7 @@ class MLBAdvancedModel:
                     # Use first bookmaker with totals market
                     for bookie in game['bookmakers']:
                         for market in bookie['markets']:
-                            if market['key'] == 'totals':
+                            if (market['key'] == 'totals'):
                                 for outcome in market['outcomes']:
                                     if outcome['name'] == 'Over':
                                         over_under_line = float(outcome['point'])
@@ -923,7 +1169,7 @@ class MLBAdvancedModel:
                         game_datetime=game['date']
                     )
                     
-                    if weather:
+                    if (weather):
                         weather_list.append(weather)
                     else:
                         # Create empty weather data
@@ -1048,40 +1294,93 @@ class MLBAdvancedModel:
             return variations[team_name]
         
         # Try to match partial names
-        for full_name, abbr in team_map.items():
-            city, nickname = full_name.split(' ', 1)
-            
-            # Check if team_name contains both city and nickname
-            if city in team_name and nickname in team_name:
-                return abbr
-            
-            # Check if nickname matches exactly
-            if team_name == nickname:
+        for abbr in TEAM_NAME_MAP.keys():
+            if abbr in team_name:
                 return abbr
         
-        # If all else fails, return original
-        return team_name[:3].upper()
-    
-    def get_stadium_info(self, team_abbr):
-        """
-        Get stadium information for a team.
+        # If all else fails, try fuzzy matching
+        from difflib import get_close_matches
+        matches = get_close_matches(team_name, list(TEAM_NAME_MAP.keys()) + list(TEAM_NAME_MAP.values()))
+        if matches:
+            match = matches[0]
+            if match in TEAM_NAME_MAP:
+                return match
+            for abbr, name in TEAM_NAME_MAP.items():
+                if name == match:
+                    return abbr
         
-        Args:
-            team_abbr (str): Team abbreviation
-            
-        Returns:
-            dict: Stadium information
-        """
-        # Get stadium info from config
-        if team_abbr in STADIUM_MAPPING:
-            return STADIUM_MAPPING[team_abbr]
-        
+        return team_name[:3].upper()  # Last resort
+
+    def get_stadium_info(self, home_team):
+        """Get stadium information for a team."""
+        if home_team in STADIUM_MAPPING:
+            return STADIUM_MAPPING[home_team]
+
+        # Try to infer team from stadium name
+        for team, info in STADIUM_MAPPING.items():
+            if team in home_team or home_team in team:
+                return info
+
         # Default values if team not found
         return {
-            'name': f"{team_abbr} Stadium",
+            'name': f"{home_team} Stadium",
             'lat': 40.0,  # Default latitude
             'lon': -75.0,  # Default longitude
             'dome': False,
             'retractable_roof': False,
             'orientation': 0
         }
+
+    def __str__(self):
+        """String representation of model state."""
+        status = []
+        status.append(f"Model Type: {self.model_type}")
+        status.append(f"Features: {len(self.features) if self.features else 0}")
+
+        status.append(f"Data Records: {len(self.merged_data) if self.merged_data is not None else 0}")
+        status.append(f"Model Trained: {self.model is not None}")
+        if self.timestamp:
+            status.append(f"Last Updated: {self.timestamp}")
+        return "\n".join(status)
+        status.append(f"Features: {len(self.features) if self.features else 0}")
+        status.append(f"Data Records: {len(self.merged_data) if self.merged_data is not None else 0}")
+        status.append(f"Model Trained: {self.model is not None}")
+        if self.timestamp:
+            status.append(f"Last Updated: {self.timestamp}")
+        return "\n".join(status)
+        # Calculate bias
+        bias = y_predicted - y_actual
+        print(f"Mean Bias: {bias.mean():.2f}")
+        print(f"Median Bias: {np.median(bias):.2f}")
+
+        # Visualize
+        plt.figure(figsize=(10, 6))
+        sns.histplot(bias, kde=True, bins=30)
+        plt.title("Prediction Bias (Predicted - Actual Runs)")
+        plt.xlabel("Bias")
+        plt.ylabel("Frequency")
+        if self.timestamp:
+            status.append(f"Last Updated: {self.timestamp}")
+        return "\n".join(status)
+        plt.grid(True)
+        status.append(f"Features: {len(self.features) if self.features else 0}")
+        status.append(f"Data Records: {len(self.merged_data) if self.merged_data is not None else 0}")
+        status.append(f"Model Trained: {self.model is not None}")
+        plt.show()
+
+    def __str__(self):
+        """String representation of model state."""
+        status = []
+        status.append(f"Model Type: {self.model_type}")
+    def recalibrate_predictions(self, X, y_actual):
+        """Recalibrate predictions to correct for systematic bias."""
+        y_predicted = self.model.predict(X)
+
+        # Fit a linear regression to adjust predictions
+        from sklearn.linear_model import LinearRegression
+        recalibrator = LinearRegression()
+        recalibrator.fit(y_predicted.reshape(-1, 1), y_actual)
+
+        # Apply recalibration
+        y_recalibrated = recalibrator.predict(y_predicted.reshape(-1, 1))
+        return y_recalibrated

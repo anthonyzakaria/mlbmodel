@@ -783,6 +783,23 @@ def merge_datasets(games_df, weather_df, odds_df):
     
     return merged
 
+def fetch_todays_odds():
+    """Fetch today's MLB odds from SBR."""
+    try:
+        from odds_scraper import OddsScraper
+        scraper = OddsScraper()
+        
+        today = datetime.now().strftime('%Y-%m-%d')
+        odds_df = scraper.fetch_historical_odds(today, today)
+        
+        if not odds_df.empty:
+            return odds_df
+    except Exception as e:
+        print(f"Error fetching odds from SBR: {e}")
+        
+    # Fall back to existing odds API if SBR fails
+    return fetch_odds_from_api()
+
 def main():
     """Main function to run the MLB Weather Model."""
     args = parse_args()
