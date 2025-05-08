@@ -18,6 +18,12 @@ DATA_DIR = "data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
+# Create required data directories
+for subdir in ['player_data', 'innings_data']:
+    dir_path = os.path.join(DATA_DIR, subdir)
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+
 # Stadium mapping with wind orientations and dimensions
 # lat/lon - geographical coordinates
 # orientation - angle in degrees where outfield is facing (for wind effects)

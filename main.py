@@ -19,11 +19,15 @@ from config import DATA_DIR, STADIUM_MAPPING, BALLPARK_FACTORS
 
 # Try to import advanced components with fallbacks
 try:
-    from enhanced_model import MLBAdvancedModel as MLBModel
-    print("Using enhanced model with advanced features")
+    from extended_model import MLBExtendedModel as MLBModel
+    print("Using extended model with advanced features")
 except ImportError:
-    print("Enhanced model not available. Falling back to basic model.")
-    from mlb_weather_model import MLBWeatherModel as MLBModel
+    try:
+        from enhanced_model import MLBAdvancedModel as MLBModel
+        print("Using enhanced model with basic features")
+    except ImportError:
+        print("No advanced models available. Using basic model.")
+        # Fall back to basic model here
 
 # Import visualization modules with proper error handling
 try:
@@ -863,16 +867,38 @@ def main():
     
     # Run backtest if requested
     if args.backtest:
-        print("\nFinding betting opportunities...")
-        opportunities = mlb_model.find_betting_opportunities(confidence_threshold=args.threshold)
+        print("\nRunning Backtest Analysis...")
+        # Run backtest with default parameters
+        backtest_results, metrics = mlb_model.backtest_strategy(
+            starting_bankroll=10000,
+            confidence_threshold=0.63,
+            kelly=True
+        )
         
-        if opportunities is not None and len(opportunities) > 0:
-            print("\nRunning backtest...")
-            results = mlb_model.backtest_strategy(kelly=args.kelly)
+        if metrics:
+            print("\nBacktest Summary:")
+            print("=" * 40)
+            print(f"Total Bets: {metrics['total_bets']}")
+            print(f"Win Rate: {metrics['win_rate']:.1%}")
+            print(f"Starting Bankroll: $10,000")
+            print(f"Final Bankroll: ${metrics['final_bankroll']:,.2f}")
+            print(f"Net Profit: ${metrics['net_profit']:,.2f}")
+            print(f"ROI: {metrics['roi']:.1%}")
+            print(f"Max Drawdown: {metrics['max_drawdown']:.1%}")
+            print(f"Longest Win Streak: {metrics['max_win_streak']}")
+            print(f"Longest Lose Streak: {metrics['max_lose_streak']}")
             
-            # Visualize the weather impact on betting success
-            print("\nAnalyzing weather impact on betting success...")
-            visualize_weather_impact(opportunities)
+            # Display monthly breakdown if available
+            if backtest_results is not None:
+                print("\nMonthly Performance:")
+                print("=" * 40)
+                monthly = backtest_results.groupby(backtest_results['date'].dt.strftime('%Y-%m')).agg({
+                    'bet_return': 'sum',
+                    'bet_result': 'count'
+                }).reset_index()
+                
+                for _, month in monthly.iterrows():
+                    print(f"{month['date']}: ${month['bet_return']:,.2f} from {month['bet_result']} bets")
     
     # Get today's recommendations if requested
     if args.today:

@@ -481,7 +481,7 @@ class MLBAdvancedModel:
         y_recalibrated = recalibrator.predict(y_predicted.reshape(-1, 1))
         return y_recalibrated
 
-    def predict(self, features, recalibrate_to_vegas_mean=True, vegas_mean=8.59):
+    def predict(self, features, recalibrate_to_vegas_mean=False, vegas_mean=8.59):
         """
         Make predictions using the trained model, with optional recalibration.
         """
@@ -772,155 +772,120 @@ class MLBAdvancedModel:
 
         return weighted_std
 
-    def backtest_strategy(self, start_date=None, end_date=None, kelly=False):
-        """
-        Backtest the betting strategy.
-        
-        Args:
-            start_date (str): Start date for backtest
-            end_date (str): End date for backtest
-            kelly (bool): Whether to use Kelly criterion for bet sizing
-            
-        Returns:
-            DataFrame: Backtest results
-        """
-        # Find opportunities
-        opportunities = self.find_betting_opportunities()
+    def backtest_strategy(self, start_date=None, end_date=None, kelly=False, starting_bankroll=10000, confidence_threshold=0.63):
+        """Backtest the betting strategy with detailed ROI tracking."""
+        # Find opportunities with higher confidence threshold
+        opportunities = self.find_betting_opportunities(confidence_threshold=confidence_threshold)
         
         if opportunities is None or len(opportunities) == 0:
             print("No opportunities found for backtesting.")
-            return None
+            return None, None
+            
+        print(f"\nProcessing {len(opportunities)} betting opportunities...")
         
+        # Convert date column if it exists
+        if 'date' in opportunities.columns:
+            opportunities['date'] = pd.to_datetime(opportunities['date'])
+            
         # Filter by date range if provided
         if start_date:
-            opportunities = opportunities[opportunities['date'] >= pd.to_datetime(start_date)]
-        
+            start_date = pd.to_datetime(start_date)
+            opportunities = opportunities[opportunities['date'] >= start_date]
         if end_date:
-            opportunities = opportunities[opportunities['date'] <= pd.to_datetime(end_date)]
-        
-        # Sort chronologically
-        opportunities = opportunities.sort_values('date')
-        
-        # Initialize bankroll
-        starting_bankroll = 1000
-        current_bankroll = starting_bankroll
-        
-        # Bet sizing
-        if kelly:
-            # Use Kelly criterion for bet sizing
-            print("Using Kelly criterion for bet sizing...")
-            
-            # Calculate win probability and edge
-            opportunities['win_prob'] = opportunities['confidence']
-            opportunities['edge'] = (opportunities['win_prob'] * 1.9) - 1  # Assume -110 odds (1.91)
-            
-            # Calculate Kelly percentage (cap at 5%)
-            opportunities['kelly_pct'] = np.clip(
-                opportunities['win_prob'] - ((1 - opportunities['win_prob']) / 1.9),
-                0,
-                0.05
+            end_date = pd.to_datetime(end_date)
+            opportunities = opportunities[opportunities['date'] <= end_date]
+
+        # Initialize bet results based on bet type and actual results
+        opportunities['bet_result'] = np.where(
+            (opportunities['bet_type'] == 'Over') & (opportunities['total_runs'] > opportunities['over_under_line']),
+            1,  # Over bet wins
+            np.where(
+                (opportunities['bet_type'] == 'Under') & (opportunities['total_runs'] < opportunities['over_under_line']),
+                1,  # Under bet wins
+                np.where(
+                    opportunities['total_runs'] == opportunities['over_under_line'],
+                    0,  # Push
+                    -1  # Loss
+                )
             )
+        )
+        
+        # Initialize bankroll tracking
+        current_bankroll = starting_bankroll
+        opportunities['bankroll'] = starting_bankroll
+        
+        # Calculate bet amounts and returns
+        if kelly:
+            print("Using Kelly criterion for bet sizing...")
+            opportunities['bet_size'] = opportunities.apply(
+                lambda row: self.calculate_kelly_fraction(
+                    win_prob=row['confidence'],
+                    odds=-110
+                ),
+                axis=1
+            ).clip(0, 0.05)  # Cap at 5%
             
-            # Calculate bet amount
             opportunities['bet_amount'] = opportunities.apply(
-                lambda row: row['kelly_pct'] * current_bankroll,
+                lambda row: row['bet_size'] * current_bankroll,
                 axis=1
             )
         else:
-            # Use flat betting (1% of bankroll)
-            opportunities['bet_amount'] = starting_bankroll * 0.01
+            opportunities['bet_amount'] = starting_bankroll * 0.01  # Fixed 1% per bet
         
-        # Calculate returns
-        # Assume -110 odds (1.91 decimal)
+        # Calculate bet returns and running bankroll
         opportunities['bet_return'] = np.where(
-            opportunities['bet_result'] == 1,  # Win
-            opportunities['bet_amount'] * 0.91,  # Return = 1.91 - 1.0 (initial stake)
+            opportunities['bet_result'] == 1,
+            opportunities['bet_amount'] * 0.91,  # Win: get back stake plus profit
             np.where(
-                opportunities['bet_result'] == 0,  # Push
-                0,
+                opportunities['bet_result'] == 0,
+                0,  # Push: get stake back
                 -opportunities['bet_amount']  # Loss
             )
         )
         
-        # Calculate cumulative bankroll
-        opportunities['bankroll'] = starting_bankroll + opportunities['bet_return'].cumsum()
+        # Calculate cumulative returns and running bankroll
+        opportunities['cumulative_return'] = opportunities['bet_return'].cumsum()
+        opportunities['bankroll'] = starting_bankroll + opportunities['cumulative_return']
         
-        # Calculate performance metrics
-        total_bets = len(opportunities)
-        winning_bets = sum(opportunities['bet_result'] == 1)
-        losing_bets = sum(opportunities['bet_result'] == -1)
-        push_bets = sum(opportunities['bet_result'] == 0)
+        # Calculate monthly performance
+        monthly_performance = opportunities.groupby(opportunities['date'].dt.strftime('%Y-%m')).agg({
+            'bet_return': ['sum', 'count'],
+            'bet_result': lambda x: (x == 1).sum()
+        }).round(2)
         
-        win_pct = winning_bets / (winning_bets + losing_bets) if (winning_bets + losing_bets) > 0 else 0
+        # Calculate final metrics
+        final_bankroll = opportunities['bankroll'].iloc[-1]
+        total_profit = final_bankroll - starting_bankroll
+        win_rate = (opportunities['bet_result'] == 1).mean()
+        roi = total_profit / starting_bankroll
         
-        final_bankroll = opportunities['bankroll'].iloc[-1] if len(opportunities) > 0 else starting_bankroll
-        roi = (final_bankroll - starting_bankroll) / starting_bankroll
+        metrics = {
+            'total_bets': len(opportunities),
+            'win_rate': win_rate,
+            'final_bankroll': final_bankroll,
+            'net_profit': total_profit,
+            'roi': roi,
+            'max_win_streak': self._get_max_streak(opportunities['bet_result'], 1),
+            'max_lose_streak': self._get_max_streak(opportunities['bet_result'], -1),
+            'max_drawdown': self._calculate_max_drawdown(opportunities['bankroll']),
+            'monthly_performance': monthly_performance
+        }
         
-        print("\nBacktest Results:")
-        print(f"Period: {opportunities['date'].min()} to {opportunities['date'].max()}")
-        print(f"Total Bets: {total_bets}")
-        print(f"Wins: {winning_bets} ({win_pct:.1%})")
-        print(f"Losses: {losing_bets}")
-        print(f"Pushes: {push_bets}")
-        print(f"Starting Bankroll: ${starting_bankroll}")
-        print(f"Final Bankroll: ${final_bankroll:.2f}")
-        print(f"ROI: {roi:.2%}")
-        
-        # Create chart of bankroll over time
-        try:
-            plt.figure(figsize=(12, 6))
-            plt.plot(opportunities['date'], opportunities['bankroll'])
-            plt.axhline(y=starting_bankroll, color='r', linestyle='--')
-            plt.title('Bankroll Over Time')
-            plt.xlabel('Date')
-            plt.ylabel('Bankroll ($)')
-            plt.grid(True)
-            plt.savefig(f"{DATA_DIR}/backtest_results.png")
-            plt.close()
-            
-            # Create win rate by weather condition chart
-            if 'extreme_temp' in opportunities.columns and 'high_winds' in opportunities.columns:
-                # Group by weather conditions
-                weather_groups = [
-                    ('All Bets', opportunities),
-                    ('Extreme Temp', opportunities[opportunities['extreme_temp']]),
-                    ('Normal Temp', opportunities[~opportunities['extreme_temp']]),
-                    ('High Winds', opportunities[opportunities['high_winds']]),
-                    ('Low Winds', opportunities[~opportunities['high_winds']])
-                ]
-                
-                # Calculate win rates
-                win_rates = []
-                for name, group in weather_groups:
-                    if len(group) > 0:
-                        win_rate = sum(group['bet_result'] == 1) / len(group)
-                        win_rates.append({
-                            'Condition': name,
-                            'Win Rate': win_rate,
-                            'Count': len(group)
-                        })
-                
-                # Create chart
-                win_rate_df = pd.DataFrame(win_rates)
-                
-                plt.figure(figsize=(10, 6))
-                ax = sns.barplot(x='Condition', y='Win Rate', data=win_rate_df)
-                
-                # Add count labels
-                for i, row in enumerate(win_rate_df.itertuples()):
-                    ax.text(i, row._2 + 0.01, f"n={row.Count}", ha='center')
-                
-                plt.title('Win Rate by Weather Condition')
-                plt.ylabel('Win Rate')
-                plt.ylim(0, 1)
-                plt.grid(True, axis='y')
-                plt.savefig(f"{DATA_DIR}/weather_win_rates.png")
-                plt.close()
-        except Exception as e:
-            print(f"Error creating visualization: {e}")
-        
-        return opportunities
-    
+        return opportunities, metrics
+
+    def _get_max_streak(self, series, value):
+        """Calculate longest streak of a value in series."""
+        # Create groups at value changes
+        groups = (series != series.shift()).cumsum()
+        # Count consecutive occurrences
+        return series[series == value].groupby(groups[series == value]).count().max() if len(series) > 0 else 0
+
+    def _calculate_max_drawdown(self, equity_curve):
+        """Calculate maximum drawdown from equity curve."""
+        peak = equity_curve.expanding(min_periods=1).max()
+        drawdown = (peak - equity_curve) / peak
+        return drawdown.max()
+
     def get_todays_betting_recommendations(self, confidence_threshold=0.6):
         """
         Get today's MLB betting recommendations.
@@ -1372,15 +1337,11 @@ class MLBAdvancedModel:
         """String representation of model state."""
         status = []
         status.append(f"Model Type: {self.model_type}")
-    def recalibrate_predictions(self, X, y_actual):
-        """Recalibrate predictions to correct for systematic bias."""
-        y_predicted = self.model.predict(X)
 
-        # Fit a linear regression to adjust predictions
-        from sklearn.linear_model import LinearRegression
-        recalibrator = LinearRegression()
-        recalibrator.fit(y_predicted.reshape(-1, 1), y_actual)
-
-        # Apply recalibration
-        y_recalibrated = recalibrator.predict(y_predicted.reshape(-1, 1))
-        return y_recalibrated
+        # Ensure date column is datetime
+        opportunities['date'] = pd.to_datetime(opportunities['date'])
+        
+        # Add bet results tracking
+        opportunities['bankroll_after_bet'] = opportunities['bet_return'].cumsum() + starting_bankroll
+        
+        # ...existing code...
