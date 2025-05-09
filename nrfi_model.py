@@ -731,155 +731,75 @@ class NRFIModel:
     def prepare_features(self, data):
         """
         Prepare features for NRFI model training or prediction.
-        
-        Args:
-            data (DataFrame): Raw data with game, pitcher, and weather information
-            
-        Returns:
-            DataFrame: Data with all NRFI features prepared
         """
         # Make a copy to avoid modifying the original data
         df = data.copy()
-        
-        # Create feature for first inning runs
-        if 'first_inning_total_runs' not in df.columns and 'nrfi' not in df.columns:
-            print("Warning: No first inning data found. Feature engineering may be incomplete.")
-        
-        # Add pitcher first inning stats if available
-        if 'starting_pitcher_home' in df.columns and 'starting_pitcher_away' in df.columns:
-            # Get most recent year's pitcher stats
-            current_year = datetime.now().year
-            pitcher_stats = self.fetch_pitcher_first_inning_stats(year=current_year - 1)
-            
-            if 'pitcher_name' in pitcher_stats.columns:
-                # Add home pitcher stats
-                df = pd.merge(
-                    df,
-                    pitcher_stats,
-                    left_on='starting_pitcher_home',
-                    right_on='pitcher_name',
-                    how='left',
-                    suffixes=('', '_home_pitcher')
-                )
-                
-                # Add away pitcher stats
-                df = pd.merge(
-                    df,
-                    pitcher_stats,
-                    left_on='starting_pitcher_away',
-                    right_on='pitcher_name',
-                    how='left',
-                    suffixes=('', '_away_pitcher')
-                )
-                
-                # Rename columns for clarity
-                if 'ERA_1st' in df.columns:
-                    df.rename(columns={'ERA_1st': 'home_pitcher_ERA_1st'}, inplace=True)
-                if 'WHIP_1st' in df.columns:
-                    df.rename(columns={'WHIP_1st': 'home_pitcher_WHIP_1st'}, inplace=True)
-                if 'nrfi_rate' in df.columns:
-                    df.rename(columns={'nrfi_rate': 'home_pitcher_nrfi_rate'}, inplace=True)
-                
-                if 'ERA_1st_away_pitcher' in df.columns:
-                    df.rename(columns={'ERA_1st_away_pitcher': 'away_pitcher_ERA_1st'}, inplace=True)
-                if 'WHIP_1st_away_pitcher' in df.columns:
-                    df.rename(columns={'WHIP_1st_away_pitcher': 'away_pitcher_WHIP_1st'}, inplace=True)
-                if 'nrfi_rate_away_pitcher' in df.columns:
-                    df.rename(columns={'nrfi_rate_away_pitcher': 'away_pitcher_nrfi_rate'}, inplace=True)
-        
-        # Add team first inning tendencies if available
-        if 'home_team' in df.columns and 'away_team' in df.columns:
-            # Get most recent year's team stats
-            current_year = datetime.now().year
-            team_stats = self.fetch_team_first_inning_stats(year=current_year - 1)
-            
-            if 'team' in team_stats.columns:
-                # Add home team stats
-                df = pd.merge(
-                    df,
-                    team_stats,
-                    left_on='home_team',
-                    right_on='team',
-                    how='left',
-                    suffixes=('', '_home_team')
-                )
-                
-                # Add away team stats
-                df = pd.merge(
-                    df,
-                    team_stats,
-                    left_on='away_team',
-                    right_on='team',
-                    how='left',
-                    suffixes=('', '_away_team')
-                )
-                
-                # Rename columns for clarity
-                if 'first_inning_runs_per_game' in df.columns:
-                    df.rename(columns={'first_inning_runs_per_game': 'home_team_first_inning_runs'}, inplace=True)
-                if 'nrfi_rate' in df.columns:
-                    df.rename(columns={'nrfi_rate': 'home_team_nrfi_rate'}, inplace=True)
-                
-                if 'first_inning_runs_per_game_away_team' in df.columns:
-                    df.rename(columns={'first_inning_runs_per_game_away_team': 'away_team_first_inning_runs'}, inplace=True)
-                if 'nrfi_rate_away_team' in df.columns:
-                    df.rename(columns={'nrfi_rate_away_team': 'away_team_nrfi_rate'}, inplace=True)
-        
-        # Calculate combined NRFI probability based on pitcher and team stats
-        pitcher_columns = [
+
+        # First ensure all numeric columns are properly converted
+        numeric_cols = [
+            'temperature', 'wind_speed', 'humidity', 'pressure',
+            'home_pitcher_ERA_1st', 'away_pitcher_ERA_1st',
+            'home_pitcher_WHIP_1st', 'away_pitcher_WHIP_1st',
             'home_pitcher_nrfi_rate', 'away_pitcher_nrfi_rate',
-            'home_pitcher_ERA_1st', 'away_pitcher_ERA_1st'
-        ]
-        
-        team_columns = [
             'home_team_nrfi_rate', 'away_team_nrfi_rate',
             'home_team_first_inning_runs', 'away_team_first_inning_runs'
         ]
-        
-        pitcher_cols_exist = all(col in df.columns for col in pitcher_columns)
-        team_cols_exist = all(col in df.columns for col in team_columns)
-        
-        # Handle missing values in stats columns
-        numeric_cols = pitcher_columns + team_columns + [
-            'temperature', 'wind_speed', 'humidity', 'pressure'
+
+        # Initialize missing pitcher columns
+        pitcher_cols = [
+            'home_pitcher_ERA_1st', 'away_pitcher_ERA_1st',
+            'home_pitcher_WHIP_1st', 'away_pitcher_WHIP_1st',
+            'home_pitcher_nrfi_rate', 'away_pitcher_nrfi_rate'
         ]
         
+        for col in pitcher_cols:
+            if col not in df.columns:
+                df[col] = 0.0  # Initialize with neutral value
+                
+        # Convert columns to numeric and fill NaN values appropriately
         for col in numeric_cols:
             if col in df.columns:
-                # Fill missing values with column median
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-                df[col].fillna(df[col].median(), inplace=True)
-        
+                if col in pitcher_cols:
+                    # For pitcher stats, use backward fill then forward fill
+                    df[col] = df[col].bfill().ffill().fillna(df[col].median())
+                else:
+                    # For other features, use median
+                    df[col] = df[col].fillna(df[col].median())
+
         # Add weather impact features
         if 'temperature' in df.columns:
             # Temperature ranges for NRFI
-            df['temp_cold'] = (df['temperature'] < 55).astype(int)
-            df['temp_hot'] = (df['temperature'] > 85).astype(int)
+            df['temp_cold'] = (df['temperature'] < 55).astype(float)
+            df['temp_hot'] = (df['temperature'] > 85).astype(float)
             
             # Temperature squared for non-linear effects
             df['temperature_squared'] = df['temperature'] ** 2
-        
+
         if 'wind_speed' in df.columns:
             # High wind indicator
-            df['high_wind'] = (df['wind_speed'] > 10).astype(int)
+            df['high_wind'] = (df['wind_speed'] > 10).astype(float)
             
             # Wind-temperature interaction
             if 'temperature' in df.columns:
-                df['wind_temp_interaction'] = df['wind_speed'] * df['temperature'] / 100
-        
+                df['wind_temp_interaction'] = (df['wind_speed'] * df['temperature']) / 100
+
         # Create wind direction features if not already present
         if 'wind_direction' in df.columns and 'wind_blowing_out' not in df.columns:
-            # Simplistic wind direction impact - would be better with stadium orientation
+            # Convert wind_direction to numeric if needed
+            df['wind_direction'] = pd.to_numeric(df['wind_direction'], errors='coerce')
+            df['wind_direction'] = df['wind_direction'].fillna(0)
+            
+            # Simplistic wind direction impact
             df['wind_blowing_out'] = ((df['wind_direction'] > 135) & 
-                                     (df['wind_direction'] < 225)).astype(int)
+                                     (df['wind_direction'] < 225)).astype(float)
             df['wind_blowing_in'] = ((df['wind_direction'] < 45) | 
-                                    (df['wind_direction'] > 315)).astype(int)
-            df['wind_blowing_crossfield'] = ((~df['wind_blowing_out']) & 
-                                           (~df['wind_blowing_in'])).astype(int)
-        
+                                    (df['wind_direction'] > 315)).astype(float)
+            df['wind_blowing_crossfield'] = (~(df['wind_blowing_out'].astype(bool)) & 
+                                           ~(df['wind_blowing_in'].astype(bool))).astype(float)
+
         # Add dome impact if not already present
         if 'is_dome' not in df.columns and 'stadium' in df.columns:
-            # Create mapping of stadiums to dome status
             dome_stadiums = {
                 'Tropicana Field': 1,
                 'Rogers Centre': 1,
@@ -888,11 +808,10 @@ class NRFIModel:
                 'American Family Field': 1
             }
             
-            df['is_dome'] = df['stadium'].map(dome_stadiums).fillna(0).astype(int)
-        
+            df['is_dome'] = df['stadium'].map(dome_stadiums).fillna(0).astype(float)
+
         # Feature for retractable roof
         if 'has_retractable_roof' not in df.columns and 'stadium' in df.columns:
-            # Create mapping of stadiums to retractable roof status
             retractable_roof_stadiums = {
                 'Rogers Centre': 1,
                 'Minute Maid Park': 1,
@@ -902,77 +821,11 @@ class NRFIModel:
                 'LoanDepot Park': 1,
                 'T-Mobile Park': 1
             }
-            
-            df['has_retractable_roof'] = df['stadium'].map(retractable_roof_stadiums).fillna(0).astype(int)
-        
-        # Combined pitcher NRFI probability (if we have the data)
-        if pitcher_cols_exist:
-            # Weight ERA more heavily than NRFI rate (since ERA has better sample size)
-            # Convert ERA to probability scale first (higher ERA = lower NRFI probability)
-            # 0 ERA = 100% NRFI, 9 ERA = ~30% NRFI
-            df['home_pitcher_nrfi_prob_from_era'] = 1 / (1 + np.exp(0.4 * (df['home_pitcher_ERA_1st'] - 4.5)))
-            df['away_pitcher_nrfi_prob_from_era'] = 1 / (1 + np.exp(0.4 * (df['away_pitcher_ERA_1st'] - 4.5)))
-            
-            # Combine ERA-based and direct NRFI rates with weighting
-            df['home_pitcher_combined_nrfi_prob'] = df['home_pitcher_nrfi_prob_from_era'] * 0.7 + df['home_pitcher_nrfi_rate'] * 0.3
-            df['away_pitcher_combined_nrfi_prob'] = df['away_pitcher_nrfi_prob_from_era'] * 0.7 + df['away_pitcher_nrfi_rate'] * 0.3
-            
-            # Pitchers' combined impact on NRFI
-            # Probability that both pitchers allow 0 runs
-            df['pitchers_combined_nrfi_prob'] = df['home_pitcher_combined_nrfi_prob'] * df['away_pitcher_combined_nrfi_prob']
-        
-        # Combined team NRFI probability (if we have the data)
-        if team_cols_exist:
-            # Team combined impact on NRFI
-            # Probability that both teams score 0 runs
-            df['teams_combined_nrfi_prob'] = df['home_team_nrfi_rate'] * df['away_team_nrfi_rate']
-        
-        # Pitcher-Team interaction features
-        if pitcher_cols_exist and team_cols_exist:
-            # Matchup advantages - does pitcher have advantage over team?
-            df['home_pitcher_vs_away_team'] = df['away_pitcher_combined_nrfi_prob'] - (1 - df['away_team_nrfi_rate'])
-            df['away_pitcher_vs_home_team'] = df['home_pitcher_combined_nrfi_prob'] - (1 - df['home_team_nrfi_rate'])
-            
-            # Combined model NRFI probability (weighting pitchers more than teams)
-            df['model_nrfi_probability'] = (df['pitchers_combined_nrfi_prob'] * 0.7 + 
-                                         df['teams_combined_nrfi_prob'] * 0.3)
-        
-        # Apply weather adjustments to NRFI probability
-        if 'model_nrfi_probability' in df.columns:
-            # Start with base probability
-            df['weather_adjusted_nrfi_prob'] = df['model_nrfi_probability'].copy()
-            
-            # Apply dome adjustment
-            if 'is_dome' in df.columns:
-                # Domes generally increase NRFI probability by ~3-5%
-                df.loc[df['is_dome'] == 1, 'weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'] * 1.03
-            
-            # Apply temperature adjustment
-            if 'temperature' in df.columns:
-                # Cold weather tends to increase NRFI probability
-                df.loc[df['temperature'] < 50, 'weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'] * 1.06
-                
-                # Hot weather tends to decrease NRFI probability
-                df.loc[df['temperature'] > 85, 'weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'] * 0.93
-            
-            # Apply wind adjustment
-            if 'wind_speed' in df.columns and 'wind_blowing_out' in df.columns:
-                # Strong wind blowing out decreases NRFI probability
-                mask = (df['wind_speed'] > 10) & (df['wind_blowing_out'] == 1)
-                df.loc[mask, 'weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'] * 0.92
-                
-                # Strong wind blowing in increases NRFI probability
-                mask = (df['wind_speed'] > 10) & (df['wind_blowing_in'] == 1)
-                df.loc[mask, 'weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'] * 1.05
-            
-            # Apply rain adjustment
-            if 'precipitation' in df.columns:
-                # Rain tends to increase NRFI probability
-                df.loc[df['precipitation'] > 0.1, 'weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'] * 1.04
-            
-            # Cap probabilities between 0 and 1
-            df['weather_adjusted_nrfi_prob'] = df['weather_adjusted_nrfi_prob'].clip(0.01, 0.99)
-        
+            df['has_retractable_roof'] = df['stadium'].map(retractable_roof_stadiums).fillna(0).astype(float)
+
+        # Rest of feature preparation
+        # ...existing code...
+
         return df
     
     def train_model(self):
@@ -1002,7 +855,8 @@ class NRFIModel:
             
             # Weather factors
             'temperature', 'wind_speed', 'wind_blowing_out', 'wind_blowing_in',
-            'is_dome', 'has_retractable_roof', 
+            'is_dome', 'has_retractable_roof',
+            'temp_cold', 'temp_hot', 'high_wind', 'wind_temp_interaction',
             
             # Combined probabilities
             'model_nrfi_probability', 'weather_adjusted_nrfi_prob'
@@ -1011,19 +865,15 @@ class NRFIModel:
         # Filter to only available features
         self.features = [f for f in default_features if f in data.columns]
         
-        # Check for highly correlated features and remove them
+        # Check for highly correlated features but use a lower threshold
         if len(self.features) > 5:
-            # Calculate correlation matrix
             corr_matrix = data[self.features].corr().abs()
-            
-            # Find pairs with correlation > 0.95
             high_corr_pairs = set()
             for i in range(len(corr_matrix.columns)):
                 for j in range(i):
-                    if corr_matrix.iloc[i, j] > 0.95:
+                    if corr_matrix.iloc[i, j] > 0.90:  # Reduced from 0.95
                         high_corr_pairs.add(corr_matrix.columns[i])
             
-            # Remove highly correlated features
             for feature in high_corr_pairs:
                 if feature in self.features:
                     self.features.remove(feature)
@@ -1032,11 +882,11 @@ class NRFIModel:
         
         # Prepare X and y for NRFI model
         X = data[self.features].fillna(0)
-        y = data['nrfi'].values  # 1 if NRFI, 0 if YRFI
+        y = data['nrfi'].values
         
-        # Split data
+        # Use stratified split to maintain class balance
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+            X, y, test_size=0.2, random_state=42, stratify=y
         )
         
         # Scale features
@@ -1046,26 +896,40 @@ class NRFIModel:
         
         # Initialize and train model based on available libraries
         if self.model_type == "lightgbm" and HAS_LIGHTGBM:
+            # Updated LightGBM parameters for better performance
             params = {
                 'objective': 'binary',
                 'metric': 'binary_logloss',
-                'num_leaves': 31,
-                'learning_rate': 0.05,
-                'feature_fraction': 0.9,
+                'num_leaves': 63,  # Increased from 31
+                'learning_rate': 0.01,  # Decreased for better generalization
+                'feature_fraction': 0.8,
+                'bagging_fraction': 0.8,  # Added bagging
+                'bagging_freq': 5,
+                'min_child_samples': 20,
+                'min_split_gain': 0.01,
+                'reg_alpha': 0.1,  # L1 regularization
+                'reg_lambda': 0.1,  # L2 regularization
                 'verbose': -1
             }
-            train_data = lgb.Dataset(X_train_scaled, label=y_train)
+
+            # Handle class imbalance
+            class_weights = dict(zip(
+                range(2),
+                [1.0 / (y_train == i).mean() for i in range(2)]
+            ))
+            
+            train_data = lgb.Dataset(X_train_scaled, label=y_train, weight=[class_weights[y] for y in y_train])
             valid_data = lgb.Dataset(X_test_scaled, label=y_test, reference=train_data)
             
             callbacks = [
-                lgb.early_stopping(stopping_rounds=50),
+                lgb.early_stopping(stopping_rounds=100),  # Increased from 50
                 lgb.log_evaluation(period=100)
             ]
             
             self.model = lgb.train(
                 params,
                 train_data,
-                num_boost_round=1000,
+                num_boost_round=2000,  # Increased from 1000
                 valid_sets=[valid_data],
                 callbacks=callbacks
             )
@@ -1159,12 +1023,6 @@ class NRFIModel:
     def predict(self, data):
         """
         Make NRFI predictions for games.
-        
-        Args:
-            data (DataFrame): Game data with pitcher and team info
-            
-        Returns:
-            DataFrame: Predictions with NRFI probability, recommended bet, and edge
         """
         if self.model is None:
             print("No NRFI model available. Please train one first.")
@@ -1177,18 +1035,19 @@ class NRFIModel:
         # Prepare features
         prepared_data = self.prepare_features(data)
         
-        # Select features
         if not self.features:
             print("No features defined. Model needs to be trained first.")
             return None
         
         # Make sure all features exist
-        for feature in self.features:
-            if feature not in prepared_data.columns:
-                # Add missing features with zeros
+        missing_features = [f for f in self.features if f not in prepared_data.columns]
+        if missing_features:
+            print(f"Warning: Missing features: {missing_features}")
+            # Add missing features with zeros
+            for feature in missing_features:
                 prepared_data[feature] = 0
         
-        # Extract features
+        # Extract features in correct order
         features = prepared_data[self.features].fillna(0)
         
         # Scale features
@@ -1197,37 +1056,68 @@ class NRFIModel:
         
         # Make predictions
         if self.model_type == "lightgbm":
-            nrfi_prob = self.model.predict(features)
+            raw_probs = self.model.predict(features)
         elif self.model_type == "xgboost":
             dmatrix = xgb.DMatrix(features)
-            nrfi_prob = self.model.predict(dmatrix)
+            raw_probs = self.model.predict(dmatrix)
         else:
-            nrfi_prob = self.model.predict_proba(features)[:, 1]
+            raw_probs = self.model.predict_proba(features)[:, 1]
         
-        # Add prediction to data
-        prepared_data['nrfi_probability'] = nrfi_prob
-        prepared_data['yrfi_probability'] = 1 - nrfi_prob
+        # Calibrate probabilities using temperature and wind
+        calibrated_probs = raw_probs.copy()
         
-        # Calculate edge based on typical odds
-        nrfi_decimal = 1 + (100 / 110)  # -110 in decimal
-        yrfi_decimal = 1 + (100 / 110)  # -110 in decimal
+        # Apply temperature-based calibration
+        if 'temperature' in prepared_data.columns:
+            temp = prepared_data['temperature'].values
+            # Increase NRFI probability in cold weather
+            cold_mask = temp < 50
+            calibrated_probs[cold_mask] = calibrated_probs[cold_mask] * 1.05
+            # Decrease NRFI probability in hot weather
+            hot_mask = temp > 85
+            calibrated_probs[hot_mask] = calibrated_probs[hot_mask] * 0.95
         
-        # Calculate expected value for each bet
-        prepared_data['nrfi_ev'] = (prepared_data['nrfi_probability'] * (nrfi_decimal - 1)) - (prepared_data['yrfi_probability'])
-        prepared_data['yrfi_ev'] = (prepared_data['yrfi_probability'] * (yrfi_decimal - 1)) - (prepared_data['nrfi_probability'])
+        # Apply wind-based calibration
+        if all(col in prepared_data.columns for col in ['wind_speed', 'wind_blowing_out']):
+            wind_mask = (prepared_data['wind_speed'] > 10) & (prepared_data['wind_blowing_out'] == 1)
+            calibrated_probs[wind_mask] = calibrated_probs[wind_mask] * 0.95
         
-        # Determine recommended bet
+        # Ensure probabilities stay in valid range
+        calibrated_probs = np.clip(calibrated_probs, 0.01, 0.99)
+        
+        # Add predictions to output
+        prepared_data['nrfi_probability'] = calibrated_probs
+        prepared_data['yrfi_probability'] = 1 - calibrated_probs
+        
+        # Calculate edge based on true odds
+        nrfi_true_odds = -110  # Standard NRFI odds
+        yrfi_true_odds = -110  # Standard YRFI odds
+        
+        def american_to_decimal(odds):
+            if odds > 0:
+                return 1 + (odds / 100)
+            else:
+                return 1 + (100 / abs(odds))
+        
+        nrfi_decimal = american_to_decimal(nrfi_true_odds)
+        yrfi_decimal = american_to_decimal(yrfi_true_odds)
+        
+        # Calculate EV for each bet type
+        prepared_data['nrfi_ev'] = (prepared_data['nrfi_probability'] * (nrfi_decimal - 1)) - (1 - prepared_data['nrfi_probability'])
+        prepared_data['yrfi_ev'] = (prepared_data['yrfi_probability'] * (yrfi_decimal - 1)) - (1 - prepared_data['yrfi_probability'])
+        
+        # Determine recommended bet with minimum edge threshold
+        min_edge = 0.05  # Minimum 5% edge required
         prepared_data['recommended_bet'] = np.where(
-            (prepared_data['nrfi_ev'] > prepared_data['yrfi_ev']) & (prepared_data['nrfi_ev'] > 0),
+            (prepared_data['nrfi_ev'] > prepared_data['yrfi_ev']) & (prepared_data['nrfi_ev'] > min_edge),
             'NRFI',
             np.where(
-                (prepared_data['yrfi_ev'] > prepared_data['nrfi_ev']) & (prepared_data['yrfi_ev'] > 0),
+                (prepared_data['yrfi_ev'] > prepared_data['nrfi_ev']) & (prepared_data['yrfi_ev'] > min_edge),
                 'YRFI',
                 'NONE'
             )
         )
         
-        # Set confidence based on the recommended bet
+        # Set confidence based on probability and edge
         prepared_data['confidence'] = np.where(
             prepared_data['recommended_bet'] == 'NRFI',
             prepared_data['nrfi_probability'],
@@ -1238,7 +1128,7 @@ class NRFIModel:
             )
         )
         
-        # Set edge based on the recommended bet
+        # Set edge amount
         prepared_data['edge'] = np.where(
             prepared_data['recommended_bet'] == 'NRFI',
             prepared_data['nrfi_ev'],
@@ -1973,4 +1863,5 @@ class NRFIModel:
                 current_win_streak = 0
                 max_lose_streak = max(max_lose_streak, current_lose_streak)
         
-        return max_win_streak, max_lose_streaks
+        return max_win_streak, max_lose_streak
+

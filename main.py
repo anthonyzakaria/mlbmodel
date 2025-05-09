@@ -102,6 +102,8 @@ def parse_args():
                         help='Get today\'s betting recommendations')
     parser.add_argument('--threshold', type=float, default=0.5, 
                         help='Confidence threshold for betting recommendations')
+    parser.add_argument('--update-stats', action='store_true',
+                        help='Update team and pitcher statistics')
     
     # Add NRFI/YRFI specific arguments
     parser.add_argument('--fetch-innings', action='store_true',
@@ -858,6 +860,95 @@ def fetch_todays_odds():
     # Fall back to existing odds API if SBR fails
     return fetch_odds_from_api()
 
+def update_team_and_pitcher_stats(merged_data):
+    """
+    Update team and pitcher first inning statistics.
+    
+    Args:
+        merged_data (DataFrame): Merged dataset with game and first inning data
+    
+    Returns:
+        DataFrame: Updated dataset with team and pitcher stats
+    """
+    if merged_data is None or 'first_inning_total_runs' not in merged_data.columns:
+        print("Cannot update stats - missing first inning data")
+        return merged_data
+        
+    print("Updating team and pitcher statistics...")
+    df = merged_data.copy()
+    
+    # Convert date to datetime if needed
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # Calculate team first inning stats
+    team_stats = {}
+    for team in df['home_team'].unique():
+        # Home games
+        home_games = df[df['home_team'] == team]
+        # Away games
+        away_games = df[df['away_team'] == team]
+        
+        # Calculate NRFI rate
+        home_nrfi = (home_games['first_inning_total_runs'] == 0).mean()
+        away_nrfi = (away_games['first_inning_total_runs'] == 0).mean()
+        
+        # Calculate average first inning runs
+        home_runs = home_games['first_inning_home_runs'].mean()
+        away_runs = away_games['first_inning_away_runs'].mean()
+        
+        team_stats[team] = {
+            'nrfi_rate': (home_nrfi + away_nrfi) / 2,
+            'first_inning_runs': (home_runs + away_runs) / 2
+        }
+    
+    # Add team stats to dataframe
+    df['home_team_nrfi_rate'] = df['home_team'].map(lambda x: team_stats[x]['nrfi_rate'])
+    df['away_team_nrfi_rate'] = df['away_team'].map(lambda x: team_stats[x]['nrfi_rate'])
+    df['home_team_first_inning_runs'] = df['home_team'].map(lambda x: team_stats[x]['first_inning_runs'])
+    df['away_team_first_inning_runs'] = df['away_team'].map(lambda x: team_stats[x]['first_inning_runs'])
+    
+    # Calculate pitcher first inning stats if available
+    if 'starting_pitcher_home' in df.columns and 'starting_pitcher_away' in df.columns:
+        pitcher_stats = {}
+        for pitcher in pd.concat([df['starting_pitcher_home'], df['starting_pitcher_away']]).unique():
+            if pd.isna(pitcher):
+                continue
+                
+            # Get all games by this pitcher
+            pitcher_games = df[(df['starting_pitcher_home'] == pitcher) | (df['starting_pitcher_away'] == pitcher)]
+            
+            if len(pitcher_games) < 5:  # Skip pitchers with too few games
+                continue
+            
+            # Calculate ERA (ER/IP * 9)
+            runs_allowed = pitcher_games['first_inning_total_runs'].sum()
+            innings = len(pitcher_games)  # Each game = 1 first inning
+            era = (runs_allowed / innings) * 9 if innings > 0 else 0
+            
+            # Calculate WHIP ((H+BB)/IP)
+            # Since we don't have H and BB for first inning, estimate based on runs
+            whip = runs_allowed / innings if innings > 0 else 0
+            
+            # Calculate NRFI rate
+            nrfi_rate = (pitcher_games['first_inning_total_runs'] == 0).mean()
+            
+            pitcher_stats[pitcher] = {
+                'ERA_1st': era,
+                'WHIP_1st': whip,
+                'nrfi_rate': nrfi_rate
+            }
+        
+        # Add pitcher stats to dataframe
+        df['home_pitcher_ERA_1st'] = df['starting_pitcher_home'].map(lambda x: pitcher_stats.get(x, {}).get('ERA_1st', 0))
+        df['away_pitcher_ERA_1st'] = df['starting_pitcher_away'].map(lambda x: pitcher_stats.get(x, {}).get('ERA_1st', 0))
+        df['home_pitcher_WHIP_1st'] = df['starting_pitcher_home'].map(lambda x: pitcher_stats.get(x, {}).get('WHIP_1st', 0))
+        df['away_pitcher_WHIP_1st'] = df['starting_pitcher_away'].map(lambda x: pitcher_stats.get(x, {}).get('WHIP_1st', 0))
+        df['home_pitcher_nrfi_rate'] = df['starting_pitcher_home'].map(lambda x: pitcher_stats.get(x, {}).get('nrfi_rate', 0))
+        df['away_pitcher_nrfi_rate'] = df['starting_pitcher_away'].map(lambda x: pitcher_stats.get(x, {}).get('nrfi_rate', 0))
+    
+    print("Statistics updated successfully")
+    return df
+
 def main():
     """Main function to run the MLB Weather Model."""
     args = parse_args()
@@ -908,6 +999,16 @@ def main():
         else:
             print("No existing data found. Please run with --fetch-data first.")
             return
+    
+    # Update team and pitcher stats if requested
+    if args.update_stats:
+        if merged_data is not None:
+            merged_data = update_team_and_pitcher_stats(merged_data)
+            # Save updated data
+            merged_data.to_csv(f"{DATA_DIR}/merged_data.csv", index=False)
+            print("Saved updated merged dataset")
+        else:
+            print("No data available to update stats")
     
     # Set the merged data in both models
     mlb_model.merged_data = merged_data
