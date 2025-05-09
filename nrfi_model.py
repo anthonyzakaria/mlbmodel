@@ -732,8 +732,11 @@ class NRFIModel:
         """
         Prepare features for NRFI model training or prediction.
         """
-        # Make a copy to avoid modifying the original data
         df = data.copy()
+        
+        # Sort by date to ensure proper historical calculations
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date')
 
         # First ensure all numeric columns are properly converted
         numeric_cols = [
@@ -741,8 +744,7 @@ class NRFIModel:
             'home_pitcher_ERA_1st', 'away_pitcher_ERA_1st',
             'home_pitcher_WHIP_1st', 'away_pitcher_WHIP_1st',
             'home_pitcher_nrfi_rate', 'away_pitcher_nrfi_rate',
-            'home_team_nrfi_rate', 'away_team_nrfi_rate',
-            'home_team_first_inning_runs', 'away_team_first_inning_runs'
+            'home_team_nrfi_rate', 'away_team_nrfi_rate'
         ]
 
         # Initialize missing pitcher columns
@@ -767,6 +769,31 @@ class NRFIModel:
                     # For other features, use median
                     df[col] = df[col].fillna(df[col].median())
 
+        # Initialize NRFI column if not present
+        if 'nrfi' not in df.columns:
+            # First check for first_inning_total_runs
+            if 'first_inning_total_runs' in df.columns:
+                df['nrfi'] = (df['first_inning_total_runs'] == 0).astype(int)
+            # Then try home/away first inning runs
+            elif all(col in df.columns for col in ['first_inning_home_runs', 'first_inning_away_runs']):
+                df['nrfi'] = ((df['first_inning_home_runs'] + df['first_inning_away_runs']) == 0).astype(int)
+            else:
+                # Initialize with a neutral value if no inning data available
+                df['nrfi'] = 1  # Default to NRFI=1 (no runs)
+
+        # Now calculate rolling stats since we have ensured NRFI values exist
+        window = 30  # Use last 30 games instead of 30 days
+
+        # Calculate home team rolling stats
+        df['home_team_rolling_nrfi_rate'] = df.groupby('home_team')['nrfi'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).mean()
+        )
+
+        # Calculate away team rolling stats
+        df['away_team_rolling_nrfi_rate'] = df.groupby('away_team')['nrfi'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).mean()
+        )
+
         # Add weather impact features
         if 'temperature' in df.columns:
             # Temperature ranges for NRFI
@@ -786,11 +813,9 @@ class NRFIModel:
 
         # Create wind direction features if not already present
         if 'wind_direction' in df.columns and 'wind_blowing_out' not in df.columns:
-            # Convert wind_direction to numeric if needed
             df['wind_direction'] = pd.to_numeric(df['wind_direction'], errors='coerce')
             df['wind_direction'] = df['wind_direction'].fillna(0)
             
-            # Simplistic wind direction impact
             df['wind_blowing_out'] = ((df['wind_direction'] > 135) & 
                                      (df['wind_direction'] < 225)).astype(float)
             df['wind_blowing_in'] = ((df['wind_direction'] < 45) | 
@@ -807,24 +832,7 @@ class NRFIModel:
                 'Globe Life Field': 1,
                 'American Family Field': 1
             }
-            
             df['is_dome'] = df['stadium'].map(dome_stadiums).fillna(0).astype(float)
-
-        # Feature for retractable roof
-        if 'has_retractable_roof' not in df.columns and 'stadium' in df.columns:
-            retractable_roof_stadiums = {
-                'Rogers Centre': 1,
-                'Minute Maid Park': 1,
-                'Globe Life Field': 1,
-                'American Family Field': 1,
-                'Chase Field': 1,
-                'LoanDepot Park': 1,
-                'T-Mobile Park': 1
-            }
-            df['has_retractable_roof'] = df['stadium'].map(retractable_roof_stadiums).fillna(0).astype(float)
-
-        # Rest of feature preparation
-        # ...existing code...
 
         return df
     
@@ -836,58 +844,63 @@ class NRFIModel:
         
         print("Training NRFI prediction model...")
         
-        # Prepare features specific to first inning scoring
-        data = self.prepare_features(self.merged_data)
+        # Sort data by date for time-based split
+        data = self.merged_data.copy()
+        data['date'] = pd.to_datetime(data['date'])
+        data = data.sort_values('date')
         
-        # Define default features for NRFI prediction
+        # Split based on years (2022-2023 for training, 2024 for testing)
+        train_data = data[data['date'].dt.year <= 2023]
+        test_data = data[data['date'].dt.year == 2024]
+        
+        # Print training data info if available
+        if len(train_data) > 0:
+            train_start = train_data['date'].min()
+            train_end = train_data['date'].max()
+            print(f"Training data: {len(train_data)} games from {train_start:%Y-%m-%d} to {train_end:%Y-%m-%d}")
+        else:
+            print("Warning: No training data available")
+            return False
+            
+        # Print test data info if available
+        if len(test_data) > 0:
+            test_start = test_data['date'].min()
+            test_end = test_data['date'].max()
+            print(f"Testing data: {len(test_data)} games from {test_start:%Y-%m-%d} to {test_end:%Y-%m-%d}")
+        else:
+            print("Note: No 2024 test data available yet")
+        
+        # Prepare features
+        train_data = self.prepare_features(train_data)
+        test_data = self.prepare_features(test_data)
+        
+        # Define features for NRFI prediction (historical only)
         default_features = [
-            # Pitcher stats - critical for first inning
+            # Pitcher stats
             'home_pitcher_ERA_1st', 'away_pitcher_ERA_1st',
             'home_pitcher_WHIP_1st', 'away_pitcher_WHIP_1st',
             'home_pitcher_nrfi_rate', 'away_pitcher_nrfi_rate',
             
-            # Pitcher advantages
-            'home_pitcher_vs_away_team', 'away_pitcher_vs_home_team',
-            
-            # Team stats
-            'home_team_first_inning_runs', 'away_team_first_inning_runs',
-            'home_team_nrfi_rate', 'away_team_nrfi_rate',
+            # Rolling team stats
+            'home_team_rolling_nrfi_rate', 'away_team_rolling_nrfi_rate',
             
             # Weather factors
             'temperature', 'wind_speed', 'wind_blowing_out', 'wind_blowing_in',
             'is_dome', 'has_retractable_roof',
-            'temp_cold', 'temp_hot', 'high_wind', 'wind_temp_interaction',
-            
-            # Combined probabilities
-            'model_nrfi_probability', 'weather_adjusted_nrfi_prob'
+            'temp_cold', 'temp_hot', 'high_wind', 'wind_temp_interaction'
         ]
         
         # Filter to only available features
-        self.features = [f for f in default_features if f in data.columns]
-        
-        # Check for highly correlated features but use a lower threshold
-        if len(self.features) > 5:
-            corr_matrix = data[self.features].corr().abs()
-            high_corr_pairs = set()
-            for i in range(len(corr_matrix.columns)):
-                for j in range(i):
-                    if corr_matrix.iloc[i, j] > 0.90:  # Reduced from 0.95
-                        high_corr_pairs.add(corr_matrix.columns[i])
-            
-            for feature in high_corr_pairs:
-                if feature in self.features:
-                    self.features.remove(feature)
+        self.features = [f for f in default_features if f in train_data.columns]
         
         print(f"Using {len(self.features)} features for NRFI model training")
         
         # Prepare X and y for NRFI model
-        X = data[self.features].fillna(0)
-        y = data['nrfi'].values
+        X_train = train_data[self.features].fillna(0)
+        y_train = train_data['nrfi'].values
         
-        # Use stratified split to maintain class balance
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        X_test = test_data[self.features].fillna(0)
+        y_test = test_data['nrfi'].values
         
         # Scale features
         self.scaler = StandardScaler()
@@ -1024,37 +1037,15 @@ class NRFIModel:
         """
         Make NRFI predictions for games.
         """
-        if self.model is None:
-            print("No NRFI model available. Please train one first.")
-            return None
-        
-        if data is None or len(data) == 0:
-            print("No data provided for prediction.")
-            return None
-        
         # Prepare features
         prepared_data = self.prepare_features(data)
         
-        if not self.features:
-            print("No features defined. Model needs to be trained first.")
-            return None
-        
-        # Make sure all features exist
-        missing_features = [f for f in self.features if f not in prepared_data.columns]
-        if missing_features:
-            print(f"Warning: Missing features: {missing_features}")
-            # Add missing features with zeros
-            for feature in missing_features:
-                prepared_data[feature] = 0
-        
-        # Extract features in correct order
+        # Extract and scale features
         features = prepared_data[self.features].fillna(0)
-        
-        # Scale features
         if self.scaler is not None:
             features = self.scaler.transform(features)
         
-        # Make predictions
+        # Get raw predictions
         if self.model_type == "lightgbm":
             raw_probs = self.model.predict(features)
         elif self.model_type == "xgboost":
@@ -1063,61 +1054,56 @@ class NRFIModel:
         else:
             raw_probs = self.model.predict_proba(features)[:, 1]
         
-        # Calibrate probabilities using temperature and wind
+        # More balanced calibration approach
         calibrated_probs = raw_probs.copy()
         
-        # Apply temperature-based calibration
+        # Apply very subtle weather adjustments
         if 'temperature' in prepared_data.columns:
             temp = prepared_data['temperature'].values
-            # Increase NRFI probability in cold weather
+            # Small boost for cold weather (1%)
             cold_mask = temp < 50
-            calibrated_probs[cold_mask] = calibrated_probs[cold_mask] * 1.05
-            # Decrease NRFI probability in hot weather
+            calibrated_probs[cold_mask] *= 1.01
+            # Small penalty for hot weather (1%)
             hot_mask = temp > 85
-            calibrated_probs[hot_mask] = calibrated_probs[hot_mask] * 0.95
-        
-        # Apply wind-based calibration
-        if all(col in prepared_data.columns for col in ['wind_speed', 'wind_blowing_out']):
-            wind_mask = (prepared_data['wind_speed'] > 10) & (prepared_data['wind_blowing_out'] == 1)
-            calibrated_probs[wind_mask] = calibrated_probs[wind_mask] * 0.95
-        
-        # Ensure probabilities stay in valid range
-        calibrated_probs = np.clip(calibrated_probs, 0.01, 0.99)
+            calibrated_probs[hot_mask] *= 0.99
+
+        # Apply minimal wind-based calibration
+        if all(col in prepared_data.columns for col in ['wind_speed', 'wind_blowing_out', 'wind_blowing_in']):
+            # Blowing out wind reduces NRFI probability by 1%
+            out_wind_mask = (prepared_data['wind_speed'] > 10) & (prepared_data['wind_blowing_out'] == 1)
+            calibrated_probs[out_wind_mask] *= 0.99
+            # Blowing in wind increases NRFI probability by 1%
+            in_wind_mask = (prepared_data['wind_speed'] > 10) & (prepared_data['wind_blowing_in'] == 1)
+            calibrated_probs[in_wind_mask] *= 1.01
         
         # Add predictions to output
         prepared_data['nrfi_probability'] = calibrated_probs
         prepared_data['yrfi_probability'] = 1 - calibrated_probs
         
-        # Calculate edge based on true odds
-        nrfi_true_odds = -110  # Standard NRFI odds
-        yrfi_true_odds = -110  # Standard YRFI odds
+        # Calculate edge with true odds and margin
+        nrfi_decimal = american_to_decimal(-110)
+        yrfi_decimal = american_to_decimal(-110)
+        margin = 0.01  # 1% margin of error
         
-        def american_to_decimal(odds):
-            if odds > 0:
-                return 1 + (odds / 100)
-            else:
-                return 1 + (100 / abs(odds))
+        # Calculate expected value
+        prepared_data['nrfi_ev'] = (prepared_data['nrfi_probability'] * (nrfi_decimal - 1)) - (1 - prepared_data['nrfi_probability']) - margin
+        prepared_data['yrfi_ev'] = (prepared_data['yrfi_probability'] * (yrfi_decimal - 1)) - (1 - prepared_data['yrfi_probability']) - margin
         
-        nrfi_decimal = american_to_decimal(nrfi_true_odds)
-        yrfi_decimal = american_to_decimal(yrfi_true_odds)
+        # More balanced bet recommendation thresholds
+        edge_threshold = 0.02  # 2% minimum edge required
+        prob_threshold = 0.52  # 52% minimum probability required
         
-        # Calculate EV for each bet type
-        prepared_data['nrfi_ev'] = (prepared_data['nrfi_probability'] * (nrfi_decimal - 1)) - (1 - prepared_data['nrfi_probability'])
-        prepared_data['yrfi_ev'] = (prepared_data['yrfi_probability'] * (yrfi_decimal - 1)) - (1 - prepared_data['yrfi_probability'])
-        
-        # Determine recommended bet with minimum edge threshold
-        min_edge = 0.05  # Minimum 5% edge required
         prepared_data['recommended_bet'] = np.where(
-            (prepared_data['nrfi_ev'] > prepared_data['yrfi_ev']) & (prepared_data['nrfi_ev'] > min_edge),
+            (prepared_data['nrfi_probability'] >= prob_threshold) & (prepared_data['nrfi_ev'] > edge_threshold),
             'NRFI',
             np.where(
-                (prepared_data['yrfi_ev'] > prepared_data['nrfi_ev']) & (prepared_data['yrfi_ev'] > min_edge),
+                (prepared_data['yrfi_probability'] >= prob_threshold) & (prepared_data['yrfi_ev'] > edge_threshold),
                 'YRFI',
                 'NONE'
             )
         )
         
-        # Set confidence based on probability and edge
+        # Set confidence and edge
         prepared_data['confidence'] = np.where(
             prepared_data['recommended_bet'] == 'NRFI',
             prepared_data['nrfi_probability'],
@@ -1128,7 +1114,6 @@ class NRFIModel:
             )
         )
         
-        # Set edge amount
         prepared_data['edge'] = np.where(
             prepared_data['recommended_bet'] == 'NRFI',
             prepared_data['nrfi_ev'],
@@ -1864,4 +1849,14 @@ class NRFIModel:
                 max_lose_streak = max(max_lose_streak, current_lose_streak)
         
         return max_win_streak, max_lose_streak
+
+def american_to_decimal(odds):
+    """Convert American odds to decimal format."""
+    if odds > 0:
+        return 1 + (odds / 100)
+    else:
+        return 1 + (100 / abs(odds))
+
+if __name__ == "__main__":
+    model = NRFIModel()
 
