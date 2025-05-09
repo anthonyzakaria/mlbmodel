@@ -1,5 +1,5 @@
 """
-Main script for running the MLB Weather Model.
+Main script for running the MLB Weather Model with NRFI/YRFI betting capabilities.
 This file handles the workflow from data collection to generating betting recommendations.
 """
 
@@ -17,6 +17,9 @@ import sys
 # Import configuration
 from config import DATA_DIR, STADIUM_MAPPING, BALLPARK_FACTORS
 
+# Import NRFI model
+from nrfi_model import NRFIModel
+
 # Try to import advanced components with fallbacks
 try:
     from extended_model import MLBExtendedModel as MLBModel
@@ -31,12 +34,24 @@ except ImportError:
 
 # Import visualization modules with proper error handling
 try:
-    from enhanced_visualization import visualize_betting_opportunities as visualize_mlb_bets, visualize_weather_impact
+    from enhanced_visualization import visualize_betting_opportunities as visualize_mlb_bets
+    from enhanced_visualization import visualize_weather_impact, visualize_nrfi_betting_opportunities
     print("Using enhanced visualization module")
 except ImportError:
     try:
         from visualization import visualize_mlb_bets, visualize_weather_impact
         print("Using standard visualization module")
+        
+        # Add placeholder for NRFI visualization if it doesn't exist
+        def visualize_nrfi_betting_opportunities(nrfi_df):
+            print("Visualization module for NRFI not available. Showing text summary instead:")
+            print(f"Found {len(nrfi_df)} NRFI/YRFI betting opportunities.")
+            if len(nrfi_df) > 0:
+                for _, bet in nrfi_df.iterrows():
+                    print(f"* {bet['date'].strftime('%Y-%m-%d')}: {bet['away_team']} @ {bet['home_team']} - " 
+                         f"Bet: {bet['recommended_bet']}, " 
+                         f"NRFI Prob: {bet['nrfi_probability']:.2f}, " 
+                         f"Confidence: {bet['confidence']:.2f}")
     except ImportError:
         print("Warning: Visualization modules not available. Visualizations will be disabled.")
         
@@ -50,6 +65,16 @@ except ImportError:
         
         def visualize_weather_impact(df):
             print("Visualization module not available. Skipping weather impact visualization.")
+            
+        def visualize_nrfi_betting_opportunities(nrfi_df):
+            print("Visualization module for NRFI not available. Showing text summary instead:")
+            print(f"Found {len(nrfi_df)} NRFI/YRFI betting opportunities.")
+            if len(nrfi_df) > 0:
+                for _, bet in nrfi_df.iterrows():
+                    print(f"* {bet['date'].strftime('%Y-%m-%d')}: {bet['away_team']} @ {bet['home_team']} - " 
+                         f"Bet: {bet['recommended_bet']}, " 
+                         f"NRFI Prob: {bet['nrfi_probability']:.2f}, " 
+                         f"Confidence: {bet['confidence']:.2f}")
 
 def parse_args():
     """Parse command line arguments."""
@@ -77,6 +102,22 @@ def parse_args():
                         help='Get today\'s betting recommendations')
     parser.add_argument('--threshold', type=float, default=0.5, 
                         help='Confidence threshold for betting recommendations')
+    
+    # Add NRFI/YRFI specific arguments
+    parser.add_argument('--fetch-innings', action='store_true',
+                        help='Fetch inning-by-inning data for NRFI analysis')
+    parser.add_argument('--train-nrfi', action='store_true',
+                        help='Train a new NRFI/YRFI model')
+    parser.add_argument('--analyze-nrfi', action='store_true',
+                        help='Analyze NRFI feature importance')
+    parser.add_argument('--backtest-nrfi', action='store_true',
+                        help='Run backtest on NRFI/YRFI historical data')
+    parser.add_argument('--today-nrfi', action='store_true',
+                        help='Get today\'s NRFI/YRFI betting recommendations')
+    parser.add_argument('--nrfi-threshold', type=float, default=0.6, 
+                        help='Confidence threshold for NRFI/YRFI betting recommendations')
+    parser.add_argument('--analyze-weather-nrfi', action='store_true',
+                        help='Analyze weather impact on first inning scoring')
     
     return parser.parse_args()
 
@@ -685,6 +726,19 @@ def generate_synthetic_odds(games_df):
     odds_df['over_odds'] = odds_values[:, 0]
     odds_df['under_odds'] = odds_values[:, 1]
     
+    # Add NRFI/YRFI odds
+    nrfi_odds = np.random.choice([-115, -110, -105, -100, 100, 105, 110], 
+                               size=(len(odds_df), 1),
+                               p=[0.3, 0.4, 0.1, 0.05, 0.05, 0.05, 0.05])
+    
+    yrfi_odds = np.random.choice([-115, -110, -105, -100, 100, 105, 110], 
+                               size=(len(odds_df), 1),
+                               p=[0.3, 0.4, 0.1, 0.05, 0.05, 0.05, 0.05])
+    
+    odds_df['nrfi_odds'] = nrfi_odds
+    odds_df['yrfi_odds'] = yrfi_odds
+    odds_df['first_inning_over_under'] = 0.5  # Standard line for NRFI/YRFI
+    
     return odds_df
 
 def merge_datasets(games_df, weather_df, odds_df):
@@ -815,9 +869,11 @@ def main():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
     
-    # Initialize the model
+    # Initialize the models
     mlb_model = MLBModel()
-    print("Model initialized successfully!")
+    nrfi_model = NRFIModel()
+    
+    print("Models initialized successfully!")
     
     # Fetch or load data
     if args.fetch_data:
@@ -825,6 +881,11 @@ def main():
         games_df = fetch_historical_data(args.start_year, args.end_year, use_existing=args.use_existing_games)
         
         if games_df is not None and not games_df.empty:
+            # If innings data is requested, fetch it
+            if args.fetch_innings:
+                print("\nFetching first inning data for NRFI/YRFI analysis...")
+                games_df = nrfi_model.fetch_first_inning_data(games_df, use_existing=args.use_existing_games)
+            
             weather_df = fetch_weather_data(games_df, use_existing=args.use_existing_weather)
             odds_df = generate_synthetic_odds(games_df)
             merged_data = merge_datasets(games_df, weather_df, odds_df)
@@ -837,79 +898,165 @@ def main():
         if os.path.exists(merged_file):
             print(f"Loading existing merged data from {merged_file}")
             merged_data = pd.read_csv(merged_file, parse_dates=['date'])
+            
+            # If innings data is requested but not present, fetch it
+            if args.fetch_innings and 'first_inning_total_runs' not in merged_data.columns:
+                print("\nFetching first inning data for NRFI/YRFI analysis...")
+                merged_data = nrfi_model.fetch_first_inning_data(merged_data, use_existing=args.use_existing_games)
+                # Save the updated merged data
+                merged_data.to_csv(merged_file, index=False)
         else:
             print("No existing data found. Please run with --fetch-data first.")
             return
     
-    # Set the merged data in the model
+    # Set the merged data in both models
     mlb_model.merged_data = merged_data
+    nrfi_model.merged_data = merged_data
     
-    # Train or load model
+    # Train or load over/under model
     if args.train:
-        print("\nTraining model...")
+        print("\nTraining over/under model...")
         mlb_model.train_model()
     else:
         # Try to load existing model
         try:
-            print("\nLoading pre-trained model...")
+            print("\nLoading pre-trained over/under model...")
             mlb_model.load_model()
         except FileNotFoundError:
             print("No pre-trained model found. Training new model...")
             mlb_model.train_model()
     
+    # Train or load NRFI model
+    if args.train_nrfi:
+        if 'first_inning_total_runs' in merged_data.columns and 'nrfi' in merged_data.columns:
+            print("\nTraining NRFI/YRFI model...")
+            nrfi_model.train_model()
+        else:
+            print("\nCannot train NRFI model - missing first inning data.")
+            print("Please run with --fetch-data --fetch-innings first.")
+    else:
+        # Try to load existing NRFI model
+        try:
+            print("\nLoading pre-trained NRFI/YRFI model...")
+            nrfi_model.load_model()
+        except (FileNotFoundError, AttributeError) as e:
+            print(f"No pre-trained NRFI model found: {e}")
+            if 'first_inning_total_runs' in merged_data.columns and 'nrfi' in merged_data.columns:
+                print("Training new NRFI model...")
+                nrfi_model.train_model()
+    
     # Analyze feature importance if requested
     if args.analyze:
-        print("\nAnalyzing feature importance...")
+        print("\nAnalyzing feature importance for over/under model...")
         importance = mlb_model.analyze_feature_importance()
         if importance is not None:
-            print("\nTop 10 most important features:")
+            print("\nTop 10 most important features for over/under:")
             print(importance.head(10))
     
-    # Run backtest if requested
+    # Analyze NRFI feature importance if requested
+    if args.analyze_nrfi and hasattr(nrfi_model, 'model') and nrfi_model.model is not None:
+        print("\nAnalyzing feature importance for NRFI/YRFI model...")
+        importance = nrfi_model.analyze_feature_importance()
+        if importance is not None:
+            print("\nTop 10 most important features for NRFI/YRFI:")
+            print(importance.head(10))
+    
+    # Analyze weather impact on first inning scoring
+    if args.analyze_weather_nrfi and 'first_inning_total_runs' in merged_data.columns:
+        print("\nAnalyzing weather impact on first inning scoring...")
+        weather_impact = nrfi_model.analyze_weather_impact_on_first_inning(merged_data)
+        if weather_impact:
+            print("\nWeather Impact on First Inning Scoring:")
+            print("-" * 40)
+            
+            # Print temperature impact
+            if 'temperature' in weather_impact:
+                print("\nTemperature Impact:")
+                temp_impact = weather_impact['temperature']
+                print(temp_impact[('first_inning_total_runs', 'mean')])
+                
+            # Print wind impact
+            if 'wind' in weather_impact:
+                print("\nWind Impact:")
+                wind_impact = weather_impact['wind']
+                print(wind_impact[('first_inning_total_runs', 'mean')])
+                
+            # Print dome impact
+            if 'dome' in weather_impact:
+                print("\nDome vs Outdoor Impact:")
+                dome_impact = weather_impact['dome']
+                print(dome_impact[('first_inning_total_runs', 'mean')])
+    
+    # Run backtest for over/under if requested
     if args.backtest:
-        print("\nRunning Backtest Analysis...")
-        # Run backtest with default parameters
-        backtest_results, metrics = mlb_model.backtest_strategy(
-            starting_bankroll=10000,
-            confidence_threshold=0.63,
-            kelly=True
+        print("\nRunning Over/Under Backtest Analysis...")
+        # Run backtest with requested parameters
+        opportunities, metrics = mlb_model.backtest_strategy(
+            kelly=args.kelly,
+            confidence_threshold=args.threshold
         )
         
         if metrics:
-            print("\nBacktest Summary:")
+            print("\nOver/Under Backtest Summary:")
             print("=" * 40)
-            print(f"Total Bets: {metrics['total_bets']}")
+            print(f"Total Bets: {metrics['bet_count']}")
             print(f"Win Rate: {metrics['win_rate']:.1%}")
-            print(f"Starting Bankroll: $10,000")
-            print(f"Final Bankroll: ${metrics['final_bankroll']:,.2f}")
-            print(f"Net Profit: ${metrics['net_profit']:,.2f}")
             print(f"ROI: {metrics['roi']:.1%}")
-            print(f"Max Drawdown: {metrics['max_drawdown']:.1%}")
-            print(f"Longest Win Streak: {metrics['max_win_streak']}")
-            print(f"Longest Lose Streak: {metrics['max_lose_streak']}")
+            print(f"Profit: ${metrics['profit']:,.2f}")
             
-            # Display monthly breakdown if available
-            if backtest_results is not None:
-                print("\nMonthly Performance:")
-                print("=" * 40)
-                monthly = backtest_results.groupby(backtest_results['date'].dt.strftime('%Y-%m')).agg({
-                    'bet_return': 'sum',
-                    'bet_result': 'count'
-                }).reset_index()
-                
-                for _, month in monthly.iterrows():
-                    print(f"{month['date']}: ${month['bet_return']:,.2f} from {month['bet_result']} bets")
+            # Visualize results
+            try:
+                visualize_mlb_bets(opportunities)
+            except Exception as e:
+                print(f"Error visualizing backtest results: {e}")
     
-    # Get today's recommendations if requested
+    # Run backtest for NRFI/YRFI if requested
+    if args.backtest_nrfi and hasattr(nrfi_model, 'model') and nrfi_model.model is not None:
+        print("\nRunning NRFI/YRFI Backtest Analysis...")
+        nrfi_opportunities = nrfi_model.find_betting_opportunities(confidence_threshold=args.nrfi_threshold)
+        
+        if nrfi_opportunities is not None and len(nrfi_opportunities) > 0:
+            # Run backtest
+            nrfi_results = nrfi_model.backtest_nrfi_strategy(
+                opportunities=nrfi_opportunities, 
+                starting_bankroll=10000
+            )
+            
+            # Visualize results
+            try:
+                visualize_nrfi_betting_opportunities(nrfi_opportunities)
+            except Exception as e:
+                print(f"Error visualizing NRFI results: {e}")
+        else:
+            print("No NRFI/YRFI betting opportunities found for backtest.")
+    
+    # Get today's over/under recommendations if requested
     if args.today:
-        print("\nGetting today's betting recommendations...")
+        print("\nGetting today's over/under betting recommendations...")
         today_bets = mlb_model.get_todays_betting_recommendations(confidence_threshold=args.threshold)
         
         if today_bets is not None and len(today_bets) > 0:
-            print("\nVisualizing today's recommendations...")
-            visualize_mlb_bets(today_bets)
+            print("\nVisualizing today's over/under recommendations...")
+            try:
+                visualize_mlb_bets(today_bets)
+            except Exception as e:
+                print(f"Error visualizing today's recommendations: {e}")
         else:
-            print("No betting opportunities found for today.")
+            print("No over/under betting opportunities found for today.")
+    
+    # Get today's NRFI/YRFI recommendations if requested
+    if args.today_nrfi and hasattr(nrfi_model, 'model') and nrfi_model.model is not None:
+        print("\nGetting today's NRFI/YRFI betting recommendations...")
+        nrfi_bets = nrfi_model.get_todays_nrfi_recommendations(confidence_threshold=args.nrfi_threshold)
+        
+        if nrfi_bets is not None and len(nrfi_bets) > 0:
+            print("\nVisualizing today's NRFI/YRFI recommendations...")
+            try:
+                visualize_nrfi_betting_opportunities(nrfi_bets)
+            except Exception as e:
+                print(f"Error visualizing NRFI recommendations: {e}")
+        else:
+            print("No NRFI/YRFI betting opportunities found for today.")
     
     print("\nMLB Weather Model completed successfully!")
 

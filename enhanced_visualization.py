@@ -875,3 +875,218 @@ def visualize_model_performance(model, test_data, save=False):
     
     # Show the plot
     plt.show()
+
+# Add this function to enhanced_visualization.py
+
+def visualize_nrfi_betting_opportunities(nrfi_df, results=None, title=None, save=False):
+    """
+    Create a comprehensive visualization of NRFI/YRFI betting recommendations.
+    
+    Args:
+        nrfi_df (DataFrame): DataFrame containing NRFI/YRFI betting recommendations
+        results (dict): Optional backtest results
+        title (str): Custom title for the plot
+        save (bool): Whether to save the plot to file
+    """
+    if nrfi_df is None or len(nrfi_df) == 0:
+        print("No NRFI/YRFI betting data available to visualize.")
+        return
+    
+    # Sort by confidence for better visualization
+    nrfi_df = nrfi_df.sort_values('confidence', ascending=False).reset_index(drop=True)
+    
+    # Create figure
+    fig = plt.figure(figsize=(15, 10))
+    gs = gridspec.GridSpec(3, 3, height_ratios=[1, 1, 1.5])
+    
+    # Create matchup labels
+    nrfi_df['matchup'] = nrfi_df['away_team'] + ' @ ' + nrfi_df['home_team']
+    
+    # Set colors based on recommendation
+    colors = [COLORS['under'] if bet == 'NRFI' else COLORS['over'] 
+             for bet in nrfi_df['recommended_bet']]
+    
+    # 1. Bar chart of NRFI vs YRFI probabilities
+    ax1 = plt.subplot(gs[0, :])
+    
+    # Create the bar chart
+    x = np.arange(len(nrfi_df))
+    width = 0.35
+    
+    nrfi_bars = ax1.bar(x - width/2, nrfi_df['nrfi_probability'], width, label='NRFI Probability', color='blue', alpha=0.7)
+    yrfi_bars = ax1.bar(x + width/2, nrfi_df['yrfi_probability'], width, label='YRFI Probability', color='red', alpha=0.7)
+    
+    # Add threshold line at 0.5
+    ax1.axhline(y=0.5, color='k', linestyle='--', alpha=0.5)
+    
+    # Format the plot
+    ax1.set_title('NRFI vs YRFI Probabilities', fontsize=14)
+    ax1.set_ylabel('Probability', fontsize=12)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(nrfi_df['matchup'], rotation=45, ha='right')
+    ax1.set_ylim(0, 1)
+    ax1.legend(fontsize=11)
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Horizontal bar chart for confidence levels
+    ax2 = plt.subplot(gs[1, :])
+    bars2 = ax2.barh(nrfi_df['matchup'], nrfi_df['confidence'], color=colors, alpha=0.7)
+    
+    # Add confidence values as text
+    for i, v in enumerate(nrfi_df['confidence']):
+        ax2.text(v + 0.02, i, f"{v:.2f}", va='center', color=COLORS['text'])
+    
+    ax2.set_title('Confidence Level for NRFI/YRFI Prediction', fontsize=14)
+    ax2.set_xlabel('Confidence', fontsize=12)
+    ax2.set_xlim(0, 1)
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Pitcher NRFI Rate Comparison (if available)
+    ax3 = plt.subplot(gs[2, 0])
+    
+    if 'home_pitcher_nrfi_rate' in nrfi_df.columns and 'away_pitcher_nrfi_rate' in nrfi_df.columns:
+        # Sort by combined NRFI rate
+        pitcher_data = nrfi_df.copy()
+        pitcher_data['combined_nrfi_rate'] = (pitcher_data['home_pitcher_nrfi_rate'] + 
+                                           pitcher_data['away_pitcher_nrfi_rate']) / 2
+        pitcher_data = pitcher_data.sort_values('combined_nrfi_rate', ascending=False)
+        
+        # Create stacked bar chart for pitcher NRFI rates
+        x3 = np.arange(min(6, len(pitcher_data)))  # Show at most 6 games
+        width3 = 0.35
+        
+        if len(pitcher_data) > 0:
+            # Limit to available games (max 6)
+            display_data = pitcher_data.head(6)
+            
+            ax3.bar(x3, display_data['home_pitcher_nrfi_rate'], width3, 
+                  label='Home Pitcher NRFI Rate', color='darkblue', alpha=0.7)
+            ax3.bar(x3, display_data['away_pitcher_nrfi_rate'], width3, 
+                  bottom=display_data['home_pitcher_nrfi_rate'], 
+                  label='Away Pitcher NRFI Rate', color='darkred', alpha=0.7)
+            
+            # Format the plot
+            ax3.set_title('Pitcher NRFI Rate Comparison', fontsize=14)
+            ax3.set_ylabel('NRFI Rate', fontsize=12)
+            ax3.set_xticks(x3)
+            ax3.set_xticklabels(display_data['matchup'], rotation=45, ha='right')
+            ax3.set_ylim(0, 2.0)  # Maximum is 2.0 (home + away rates)
+            ax3.legend(fontsize=9, loc='upper right')
+            ax3.grid(True, alpha=0.3)
+    else:
+        ax3.text(0.5, 0.5, "Pitcher NRFI rates not available", 
+               ha='center', va='center', transform=ax3.transAxes, fontsize=12)
+    
+    # 4. Weather Impact on NRFI (if available)
+    ax4 = plt.subplot(gs[2, 1])
+    
+    if 'temperature' in nrfi_df.columns and 'nrfi_probability' in nrfi_df.columns:
+        ax4.scatter(nrfi_df['temperature'], nrfi_df['nrfi_probability'], 
+                  c=colors, s=100, alpha=0.7, edgecolor='white')
+        
+        # Add linear trend
+        if len(nrfi_df) > 1:
+            try:
+                z = np.polyfit(nrfi_df['temperature'], nrfi_df['nrfi_probability'], 1)
+                p = np.poly1d(z)
+                x_trend = np.linspace(nrfi_df['temperature'].min(), nrfi_df['temperature'].max(), 100)
+                ax4.plot(x_trend, p(x_trend), 'k--', alpha=0.6)
+                
+                # Add correlation coefficient
+                corr = np.corrcoef(nrfi_df['temperature'], nrfi_df['nrfi_probability'])[0, 1]
+                ax4.text(0.05, 0.05, f"Correlation: {corr:.2f}", transform=ax4.transAxes,
+                       fontsize=10, va='bottom', ha='left', bbox=dict(boxstyle='round', alpha=0.1))
+            except Exception as e:
+                print(f"Error calculating trend line: {e}")
+        
+        ax4.set_title('Temperature Impact on NRFI', fontsize=14)
+        ax4.set_xlabel('Temperature (°F)', fontsize=12)
+        ax4.set_ylabel('NRFI Probability', fontsize=12)
+        ax4.grid(True, alpha=0.3)
+    else:
+        ax4.text(0.5, 0.5, "Temperature data not available", 
+               ha='center', va='center', transform=ax4.transAxes, fontsize=12)
+    
+    # 5. Team NRFI Rates (if available)
+    ax5 = plt.subplot(gs[2, 2])
+    
+    if 'home_team_nrfi_rate' in nrfi_df.columns and 'away_team_nrfi_rate' in nrfi_df.columns:
+        # Sort by combined team NRFI rate
+        team_data = nrfi_df.copy()
+        team_data['combined_team_nrfi_rate'] = (team_data['home_team_nrfi_rate'] + 
+                                             team_data['away_team_nrfi_rate']) / 2
+        team_data = team_data.sort_values('combined_team_nrfi_rate', ascending=False)
+        
+        # Create stacked bar chart for team NRFI rates
+        x5 = np.arange(min(6, len(team_data)))  # Show at most 6 games
+        width5 = 0.35
+        
+        if len(team_data) > 0:
+            # Limit to available games (max 6)
+            display_data = team_data.head(6)
+            
+            ax5.bar(x5, display_data['home_team_nrfi_rate'], width5, 
+                  label='Home Team NRFI Rate', color='navy', alpha=0.7)
+            ax5.bar(x5, display_data['away_team_nrfi_rate'], width5, 
+                  bottom=display_data['home_team_nrfi_rate'], 
+                  label='Away Team NRFI Rate', color='firebrick', alpha=0.7)
+            
+            # Format the plot
+            ax5.set_title('Team NRFI Rate Comparison', fontsize=14)
+            ax5.set_ylabel('NRFI Rate', fontsize=12)
+            ax5.set_xticks(x5)
+            ax5.set_xticklabels(display_data['matchup'], rotation=45, ha='right')
+            ax5.set_ylim(0, 2.0)  # Maximum is 2.0 (home + away rates)
+            ax5.legend(fontsize=9, loc='upper right')
+            ax5.grid(True, alpha=0.3)
+    else:
+        ax5.text(0.5, 0.5, "Team NRFI rates not available", 
+               ha='center', va='center', transform=ax5.transAxes, fontsize=12)
+    
+    # Set custom title or default
+    if title:
+        fig.suptitle(title, fontsize=16, fontweight='bold')
+    else:
+        fig.suptitle('MLB First Inning (NRFI/YRFI) Betting Recommendations', fontsize=16, fontweight='bold')
+    
+    # Adjust layout
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    # Display the best bet recommendation
+    if len(nrfi_df) > 0:
+        best_bet = nrfi_df.iloc[0]
+        print("\nBEST NRFI/YRFI BET:")
+        print(f"{best_bet['away_team']} @ {best_bet['home_team']}")
+        print(f"Recommendation: {best_bet['recommended_bet']}")
+        print(f"NRFI Probability: {best_bet['nrfi_probability']:.2f}")
+        print(f"YRFI Probability: {best_bet['yrfi_probability']:.2f}")
+        print(f"Confidence: {best_bet['confidence']:.2f}")
+        
+        if 'starting_pitcher_home' in best_bet and 'starting_pitcher_away' in best_bet:
+            print(f"Starting Pitchers: {best_bet['starting_pitcher_home']} vs {best_bet['starting_pitcher_away']}")
+        
+        if 'temperature' in best_bet and 'weather_condition' in best_bet:
+            print(f"Weather: {best_bet['temperature']:.1f}°F, {best_bet['weather_condition']}")
+    
+    # Create a simple table of all bets
+    display_cols = ['matchup', 'recommended_bet', 'nrfi_probability', 'yrfi_probability', 'confidence']
+    display_df = nrfi_df[display_cols].copy()
+    
+    # Format probabilities as percentages
+    display_df['nrfi_probability'] = (display_df['nrfi_probability'] * 100).round(1).astype(str) + '%'
+    display_df['yrfi_probability'] = (display_df['yrfi_probability'] * 100).round(1).astype(str) + '%'
+    display_df['confidence'] = (display_df['confidence'] * 100).round(1).astype(str) + '%'
+    
+    # Display the table
+    print("\nAll NRFI/YRFI Betting Recommendations:")
+    print(display_df.to_string(index=False))
+    
+    # Save if requested
+    if save:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{DATA_DIR}/nrfi_betting_recommendations_{timestamp}.png"
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"Visualization saved to {filename}")
+    
+    # Show the plot
+    plt.show()
